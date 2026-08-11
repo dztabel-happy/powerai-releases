@@ -1,0 +1,10 @@
+.DS_Store
+
+# Release assets belong in GitHub Releases, never in Git history.
+*.blockmap
+*.dmg
+*.exe
+*.msi
+*.zip
+latest*.yml
+release-assets/
