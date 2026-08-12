@@ -35,7 +35,7 @@ jobs:
       version: ${{ steps.inputs.outputs.version }}
     steps:
       - name: Checkout release contract
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
 
       - name: Validate release inputs
         id: inputs
@@ -76,7 +76,7 @@ jobs:
     timeout-minutes: 90
     steps:
       - name: Checkout exact desktop source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: dztabel-happy/powerai-desktop
           ref: ${{ inputs.desktop_ref }}
@@ -85,7 +85,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout exact agent source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: dztabel-happy/powerai-agent
           ref: ${{ inputs.agent_ref }}
@@ -164,12 +164,12 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Checkout release tooling
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           path: release-tools
 
       - name: Checkout exact desktop source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: dztabel-happy/powerai-desktop
           ref: ${{ inputs.desktop_ref }}
@@ -178,7 +178,7 @@ jobs:
           fetch-depth: 1
 
       - name: Checkout exact agent source
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: dztabel-happy/powerai-agent
           ref: ${{ inputs.agent_ref }}
