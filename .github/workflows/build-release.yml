@@ -1,0 +1,312 @@
+name: Build PowerAI Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact release version
+        required: true
+        type: string
+      desktop_ref:
+        description: Exact 40-character desktop main commit
+        required: true
+        type: string
+      agent_ref:
+        description: Exact 40-character agent main commit
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: powerai-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: 1.3.13
+
+jobs:
+  guard:
+    name: Validate immutable release inputs
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.inputs.outputs.version }}
+    steps:
+      - name: Checkout release contract
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+
+      - name: Validate release inputs
+        id: inputs
+        env:
+          VERSION: ${{ inputs.version }}
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = main
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          [[ "$DESKTOP_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$AGENT_REF" =~ ^[0-9a-f]{40}$ ]]
+          tag="v$VERSION"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            echo "Release $tag already exists" >&2
+            exit 1
+          fi
+          pending="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.draft == true and (.name | endswith("(pending notarization)"))) | .tag_name')"
+          test -z "$pending"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+  approve:
+    name: Approve immutable release
+    needs: guard
+    runs-on: ubuntu-24.04
+    environment: release-approval
+    timeout-minutes: 5
+    steps:
+      - run: echo 'Release approved'
+
+  windows-x64:
+    name: Build unsigned Windows x64
+    needs: [guard, approve]
+    runs-on: windows-2025
+    environment: release
+    timeout-minutes: 90
+    steps:
+      - name: Checkout exact desktop source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: dztabel-happy/powerai-desktop
+          ref: ${{ inputs.desktop_ref }}
+          ssh-key: ${{ secrets.POWERAI_DESKTOP_DEPLOY_KEY }}
+          path: powerai-desktop
+          fetch-depth: 1
+
+      - name: Checkout exact agent source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: dztabel-happy/powerai-agent
+          ref: ${{ inputs.agent_ref }}
+          ssh-key: ${{ secrets.POWERAI_AGENT_DEPLOY_KEY }}
+          path: powerai-agent
+          fetch-depth: 1
+
+      - name: Validate exact main commits
+        shell: bash
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git -C powerai-desktop rev-parse HEAD)" = "$DESKTOP_REF"
+          test "$(git -C powerai-agent rev-parse HEAD)" = "$AGENT_REF"
+          test "$(git -C powerai-desktop ls-remote origin refs/heads/main | cut -f1)" = "$DESKTOP_REF"
+          test "$(git -C powerai-agent ls-remote origin refs/heads/main | cut -f1)" = "$AGENT_REF"
+          node -e "const fs=require('fs'); const file='powerai-desktop/package.json'; const value=JSON.parse(fs.readFileSync(file)); value.version=process.env.VERSION; fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\n')"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build native agent
+        shell: bash
+        run: |
+          bun install --cwd powerai-agent --frozen-lockfile
+          bun run --cwd powerai-agent/packages/opencode build -- --single --skip-install
+
+      - name: Install desktop dependencies
+        shell: bash
+        run: bun install --cwd powerai-desktop --frozen-lockfile
+
+      - name: Prepare checksum-verified Electron distribution
+        shell: bash
+        run: |
+          electron_dist="$(cd powerai-desktop && node scripts/release/prepare-electron.mjs win32 x64 "$RUNNER_TEMP/electron")"
+          echo "ELECTRON_DIST_PATH=$electron_dist" >> "$GITHUB_ENV"
+
+      - name: Build unsigned Windows installer
+        working-directory: powerai-desktop
+        env:
+          CI: "true"
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: bun run build-win:x64
+
+      - name: Verify Windows artifacts
+        shell: pwsh
+        working-directory: powerai-desktop
+        run: |
+          node scripts/release/verify-native-module.mjs --app out/win-unpacked/PowerAI.exe
+          $installer = 'out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe'
+          if (-not (Test-Path $installer)) { throw "Missing $installer" }
+          if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'NotSigned') { throw 'Expected unsigned internal installer' }
+
+      - name: Retain Windows artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-x64
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe
+            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe.blockmap
+            powerai-desktop/out/latest.yml
+
+  macos-arm64:
+    name: Build and submit macOS arm64
+    needs: [guard, approve, windows-x64]
+    runs-on: macos-14
+    environment: release
+    timeout-minutes: 45
+    steps:
+      - name: Checkout release tooling
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          path: release-tools
+
+      - name: Checkout exact desktop source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: dztabel-happy/powerai-desktop
+          ref: ${{ inputs.desktop_ref }}
+          ssh-key: ${{ secrets.POWERAI_DESKTOP_DEPLOY_KEY }}
+          path: powerai-desktop
+          fetch-depth: 1
+
+      - name: Checkout exact agent source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: dztabel-happy/powerai-agent
+          ref: ${{ inputs.agent_ref }}
+          ssh-key: ${{ secrets.POWERAI_AGENT_DEPLOY_KEY }}
+          path: powerai-agent
+          fetch-depth: 1
+
+      - name: Validate exact main commits
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git -C powerai-desktop rev-parse HEAD)" = "$DESKTOP_REF"
+          test "$(git -C powerai-agent rev-parse HEAD)" = "$AGENT_REF"
+          test "$(git -C powerai-desktop ls-remote origin refs/heads/main | cut -f1)" = "$DESKTOP_REF"
+          test "$(git -C powerai-agent ls-remote origin refs/heads/main | cut -f1)" = "$AGENT_REF"
+          node -e "const fs=require('fs'); const file='powerai-desktop/package.json'; const value=JSON.parse(fs.readFileSync(file)); value.version=process.env.VERSION; fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\n')"
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build native agent
+        run: |
+          bun install --cwd powerai-agent --frozen-lockfile
+          bun run --cwd powerai-agent/packages/opencode build -- --single --skip-install
+
+      - name: Install desktop dependencies
+        run: bun install --cwd powerai-desktop --frozen-lockfile
+
+      - name: Prepare checksum-verified Electron distribution
+        run: |
+          electron_dist="$(cd powerai-desktop && node scripts/release/prepare-electron.mjs darwin arm64 "$RUNNER_TEMP/electron")"
+          echo "ELECTRON_DIST_PATH=$electron_dist" >> "$GITHUB_ENV"
+
+      - name: Prepare Apple credentials
+        env:
+          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_ISSUER: ${{ secrets.APPLE_API_KEY_ISSUER }}
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${APPLE_API_KEY_BASE64:?Missing APPLE_API_KEY_BASE64}"
+          : "${APPLE_API_KEY_ID:?Missing APPLE_API_KEY_ID}"
+          : "${APPLE_API_KEY_ISSUER:?Missing APPLE_API_KEY_ISSUER}"
+          : "${MAC_CSC_LINK:?Missing MAC_CSC_LINK}"
+          : "${MAC_CSC_KEY_PASSWORD:?Missing MAC_CSC_KEY_PASSWORD}"
+          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$key_path"
+          chmod 600 "$key_path"
+          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+
+      - name: Build signed macOS app
+        working-directory: powerai-desktop
+        env:
+          CI: "true"
+          POWERAI_RELEASE_BUILD: "1"
+          POWERAI_NOTARIZATION_MODE: deferred
+          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: bun run build-mac:arm64
+
+      - name: Submit app without waiting
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_ISSUER: ${{ secrets.APPLE_API_KEY_ISSUER }}
+        run: |
+          set -euo pipefail
+          app="powerai-desktop/out/mac-arm64/PowerAI.app"
+          pending="$RUNNER_TEMP/PowerAI-app-pending.zip"
+          codesign --verify --deep --strict --verbose=2 "$app"
+          node powerai-desktop/scripts/release/verify-native-module.mjs --app "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "$pending"
+          xcrun notarytool submit "$pending" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_KEY_ISSUER" \
+            --output-format json > "$RUNNER_TEMP/notary-submit.json"
+          submission_id="$(node -e "const value=require(process.argv[1]); if(!/^[0-9a-f-]{36}$/.test(value.id)) process.exit(1); process.stdout.write(value.id)" "$RUNNER_TEMP/notary-submit.json")"
+          node release-tools/scripts/release-state.mjs create \
+            "$RUNNER_TEMP/notary-state.json" \
+            "$VERSION" \
+            "$DESKTOP_REF" \
+            "$AGENT_REF" \
+            "$submission_id" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+      - name: Retain pending macOS app
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-pending
+          if-no-files-found: error
+          retention-days: 14
+          path: |
+            ${{ runner.temp }}/PowerAI-app-pending.zip
+            ${{ runner.temp }}/notary-state.json
+
+  stage:
+    name: Stage atomic draft release
+    needs: [guard, macos-arm64, windows-x64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
+    steps:
+      - name: Download pending release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          path: build-artifacts
+
+      - name: Create private draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          printf 'PowerAI %s internal test build.\n' "$VERSION" > release-notes.md
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target main --title "PowerAI $tag (pending notarization)" --notes-file release-notes.md \
+            build-artifacts/macos-pending/PowerAI-app-pending.zip \
+            build-artifacts/macos-pending/notary-state.json \
+            build-artifacts/windows-x64/*
