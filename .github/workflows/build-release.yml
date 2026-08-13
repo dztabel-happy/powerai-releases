@@ -52,11 +52,11 @@ jobs:
           [[ "$DESKTOP_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$AGENT_REF" =~ ^[0-9a-f]{40}$ ]]
           tag="v$VERSION"
-          if gh release view "$tag" >/dev/null 2>&1; then
+          if gh release view "$tag" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             echo "Release $tag already exists" >&2
             exit 1
           fi
-          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')"
+          previous_tag="$(gh release list --repo "$GITHUB_REPOSITORY" --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')"
           [[ "$previous_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           node -e "const a=process.argv[1].split(/[.-]/).slice(0,3).map(Number); const b=process.argv[2].slice(1).split('.').map(Number); if(!a.some((value,index)=>value!==b[index]&&value>b[index]&&a.slice(0,index).every((part,i)=>part===b[i]))) process.exit(1)" "$VERSION" "$previous_tag"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
@@ -202,7 +202,7 @@ jobs:
           release_created=false
           cleanup() {
             if [ "$release_created" = true ]; then
-              gh release delete "$tag" --yes --cleanup-tag || true
+              gh release delete "$tag" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
             fi
           }
           trap cleanup ERR
@@ -212,12 +212,12 @@ jobs:
           release_created=true
           mkdir -p "$RUNNER_TEMP/remote-check"
           while IFS= read -r file; do
-            gh release download "$tag" --pattern "$(basename "$file")" --dir "$RUNNER_TEMP/remote-check"
+            gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern "$(basename "$file")" --dir "$RUNNER_TEMP/remote-check"
           done < <(find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f | sort)
           (cd "$RUNNER_TEMP/release-assets" && sha256sum * | sort -k2) > "$RUNNER_TEMP/local-hashes.txt"
           (cd "$RUNNER_TEMP/remote-check" && sha256sum * | sort -k2) > "$RUNNER_TEMP/remote-hashes.txt"
           diff -u "$RUNNER_TEMP/local-hashes.txt" "$RUNNER_TEMP/remote-hashes.txt"
-          gh release edit "$tag" --draft=false --latest
+          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           release_created=false
 
   windows-update-acceptance:
@@ -261,7 +261,7 @@ jobs:
           PREVIOUS_VERSION: ${{ needs.guard.outputs.previous_version }}
         run: |
           New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\download" | Out-Null
-          gh release download "v$env:PREVIOUS_VERSION" --pattern "PowerAI-$env:PREVIOUS_VERSION-win-x64.exe" --dir "$env:RUNNER_TEMP\download"
+          gh release download "v$env:PREVIOUS_VERSION" --repo $env:GITHUB_REPOSITORY --pattern "PowerAI-$env:PREVIOUS_VERSION-win-x64.exe" --dir "$env:RUNNER_TEMP\download"
           $installer = "$env:RUNNER_TEMP\download\PowerAI-$env:PREVIOUS_VERSION-win-x64.exe"
           # The internal Windows channel is intentionally unsigned; public signing requires a contract change here.
           if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'NotSigned') { throw 'Expected unsigned internal installer' }
@@ -304,7 +304,7 @@ jobs:
           PREVIOUS_VERSION: ${{ needs.guard.outputs.previous_version }}
         run: |
           set -euo pipefail
-          if gh release view "v$VERSION" >/dev/null 2>&1; then
-            gh release delete "v$VERSION" --yes --cleanup-tag
+          if gh release view "v$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release delete "v$VERSION" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag
           fi
-          gh release edit "v$PREVIOUS_VERSION" --latest
+          gh release edit "v$PREVIOUS_VERSION" --repo "$GITHUB_REPOSITORY" --latest

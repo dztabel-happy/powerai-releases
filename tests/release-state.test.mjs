@@ -58,7 +58,7 @@ test("release workflows keep private source and credentials behind manual releas
     /gh release create "\$tag" --repo "\$GITHUB_REPOSITORY" --draft/,
   );
   assert.match(build, /diff -u "\$RUNNER_TEMP\/local-hashes\.txt" "\$RUNNER_TEMP\/remote-hashes\.txt"/);
-  assert.match(build, /gh release edit "\$tag" --draft=false --latest/);
+  assert.match(build, /gh release edit "\$tag" --repo "\$GITHUB_REPOSITORY" --draft=false --latest/);
   assert.match(build, /windows-update-acceptance:/);
   assert.match(build, /tests\/manual\/auto-update\/verify\.mjs/);
   assert.doesNotMatch(
@@ -73,8 +73,15 @@ test("release workflows keep private source and credentials behind manual releas
     build,
     /always\(\) && needs\.publish-windows\.result == 'success' && needs\.windows-update-acceptance\.result != 'success'/,
   );
-  assert.match(build, /gh release delete "v\$VERSION" --yes --cleanup-tag/);
-  assert.match(build, /gh release edit "v\$PREVIOUS_VERSION" --latest/);
+  assert.match(build, /gh release delete "v\$VERSION" --repo "\$GITHUB_REPOSITORY" --yes --cleanup-tag/);
+  assert.match(build, /gh release edit "v\$PREVIOUS_VERSION" --repo "\$GITHUB_REPOSITORY" --latest/);
+  assert.deepEqual(
+    build
+      .split("\n")
+      .filter((line) => line.includes("gh release ") && !line.trim().startsWith("#"))
+      .filter((line) => !line.includes("--repo")),
+    [],
+  );
   assert.doesNotMatch(build, /macos-arm64:|notarytool|APPLE_|MAC_CSC/);
   assert.doesNotMatch(finalize, /schedule:/);
   assert.match(finalize, /workflow_dispatch:/);
