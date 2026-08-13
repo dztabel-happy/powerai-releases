@@ -33,6 +33,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       version: ${{ steps.inputs.outputs.version }}
+      previous_version: ${{ steps.inputs.outputs.previous_version }}
     steps:
       - name: Checkout release contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -55,9 +56,11 @@ jobs:
             echo "Release $tag already exists" >&2
             exit 1
           fi
-          pending="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.draft == true and (.name | endswith("(pending notarization)"))) | .tag_name')"
-          test -z "$pending"
+          previous_tag="$(gh release list --exclude-drafts --exclude-pre-releases --limit 1 --json tagName --jq '.[0].tagName')"
+          [[ "$previous_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          node -e "const a=process.argv[1].split(/[.-]/).slice(0,3).map(Number); const b=process.argv[2].slice(1).split('.').map(Number); if(!a.some((value,index)=>value!==b[index]&&value>b[index]&&a.slice(0,index).every((part,i)=>part===b[i]))) process.exit(1)" "$VERSION" "$previous_tag"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "previous_version=${previous_tag#v}" >> "$GITHUB_OUTPUT"
 
   approve:
     name: Approve immutable release
@@ -156,19 +159,75 @@ jobs:
             powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe.blockmap
             powerai-desktop/out/latest.yml
 
-  macos-arm64:
-    name: Build and submit macOS arm64
-    needs: [guard, approve, windows-x64]
-    runs-on: macos-14
-    environment: release
-    timeout-minutes: 45
+  publish-windows:
+    name: Verify and publish Windows x64
+    needs: [guard, windows-x64]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    timeout-minutes: 10
     steps:
-      - name: Checkout release tooling
+      - name: Checkout release contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          path: release-tools
 
-      - name: Checkout exact desktop source
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: windows-x64
+          path: build-artifacts/windows-x64
+
+      - name: Validate exact release bundle
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+        run: |
+          set -euo pipefail
+          node scripts/windows-release.mjs prepare build-artifacts "$RUNNER_TEMP/release-assets" "$VERSION"
+          node scripts/windows-release.mjs provenance \
+            "$RUNNER_TEMP/release-assets" \
+            "$VERSION" \
+            "$DESKTOP_REF" \
+            "$AGENT_REF" \
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          node scripts/windows-release.mjs verify "$RUNNER_TEMP/release-assets" "$VERSION"
+
+      - name: Publish only after byte-for-byte verification
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.guard.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag="v$VERSION"
+          release_created=false
+          cleanup() {
+            if [ "$release_created" = true ]; then
+              gh release delete "$tag" --yes --cleanup-tag || true
+            fi
+          }
+          trap cleanup ERR
+          printf 'PowerAI %s Windows x64 internal test build. The installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target main --title "PowerAI $tag" --notes-file "$RUNNER_TEMP/release-notes.md" \
+            "$RUNNER_TEMP/release-assets"/*
+          release_created=true
+          mkdir -p "$RUNNER_TEMP/remote-check"
+          while IFS= read -r file; do
+            gh release download "$tag" --pattern "$(basename "$file")" --dir "$RUNNER_TEMP/remote-check"
+          done < <(find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f | sort)
+          (cd "$RUNNER_TEMP/release-assets" && sha256sum * | sort -k2) > "$RUNNER_TEMP/local-hashes.txt"
+          (cd "$RUNNER_TEMP/remote-check" && sha256sum * | sort -k2) > "$RUNNER_TEMP/remote-hashes.txt"
+          diff -u "$RUNNER_TEMP/local-hashes.txt" "$RUNNER_TEMP/remote-hashes.txt"
+          gh release edit "$tag" --draft=false --latest
+          release_created=false
+
+  windows-update-acceptance:
+    name: Verify installed Windows update
+    needs: [guard, publish-windows]
+    runs-on: windows-2025
+    environment: release
+    timeout-minutes: 30
+    steps:
+      - name: Checkout exact desktop acceptance harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           repository: dztabel-happy/powerai-desktop
@@ -177,136 +236,75 @@ jobs:
           path: powerai-desktop
           fetch-depth: 1
 
-      - name: Checkout exact agent source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
-        with:
-          repository: dztabel-happy/powerai-agent
-          ref: ${{ inputs.agent_ref }}
-          ssh-key: ${{ secrets.POWERAI_AGENT_DEPLOY_KEY }}
-          path: powerai-agent
-          fetch-depth: 1
-
-      - name: Validate exact main commits
+      - name: Validate exact desktop main commit
+        shell: bash
         env:
-          VERSION: ${{ needs.guard.outputs.version }}
           DESKTOP_REF: ${{ inputs.desktop_ref }}
-          AGENT_REF: ${{ inputs.agent_ref }}
         run: |
           set -euo pipefail
           test "$(git -C powerai-desktop rev-parse HEAD)" = "$DESKTOP_REF"
-          test "$(git -C powerai-agent rev-parse HEAD)" = "$AGENT_REF"
           test "$(git -C powerai-desktop ls-remote origin refs/heads/main | cut -f1)" = "$DESKTOP_REF"
-          test "$(git -C powerai-agent ls-remote origin refs/heads/main | cut -f1)" = "$AGENT_REF"
-          node -e "const fs=require('fs'); const file='powerai-desktop/package.json'; const value=JSON.parse(fs.readFileSync(file)); value.version=process.env.VERSION; fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\n')"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
-      - name: Build native agent
-        run: |
-          bun install --cwd powerai-agent --frozen-lockfile
-          bun run --cwd powerai-agent/packages/opencode build -- --single --skip-install
-
-      - name: Install desktop dependencies
+      - name: Install acceptance dependencies
+        shell: bash
         run: bun install --cwd powerai-desktop --frozen-lockfile
 
-      - name: Prepare checksum-verified Electron distribution
-        run: |
-          electron_dist="$(cd powerai-desktop && node scripts/release/prepare-electron.mjs darwin arm64 "$RUNNER_TEMP/electron")"
-          echo "ELECTRON_DIST_PATH=$electron_dist" >> "$GITHUB_ENV"
-
-      - name: Prepare Apple credentials
+      - name: Install previous public version
+        shell: pwsh
         env:
-          APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_KEY_ISSUER: ${{ secrets.APPLE_API_KEY_ISSUER }}
-          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          GH_TOKEN: ${{ github.token }}
+          PREVIOUS_VERSION: ${{ needs.guard.outputs.previous_version }}
         run: |
-          set -euo pipefail
-          : "${APPLE_API_KEY_BASE64:?Missing APPLE_API_KEY_BASE64}"
-          : "${APPLE_API_KEY_ID:?Missing APPLE_API_KEY_ID}"
-          : "${APPLE_API_KEY_ISSUER:?Missing APPLE_API_KEY_ISSUER}"
-          : "${MAC_CSC_LINK:?Missing MAC_CSC_LINK}"
-          : "${MAC_CSC_KEY_PASSWORD:?Missing MAC_CSC_KEY_PASSWORD}"
-          key_path="$RUNNER_TEMP/AuthKey_${APPLE_API_KEY_ID}.p8"
-          printf '%s' "$APPLE_API_KEY_BASE64" | base64 -D > "$key_path"
-          chmod 600 "$key_path"
-          echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
+          New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\download" | Out-Null
+          gh release download "v$env:PREVIOUS_VERSION" --pattern "PowerAI-$env:PREVIOUS_VERSION-win-x64.exe" --dir "$env:RUNNER_TEMP\download"
+          $installer = "$env:RUNNER_TEMP\download\PowerAI-$env:PREVIOUS_VERSION-win-x64.exe"
+          # The internal Windows channel is intentionally unsigned; public signing requires a contract change here.
+          if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'NotSigned') { throw 'Expected unsigned internal installer' }
+          $installDir = "$env:RUNNER_TEMP\PowerAI"
+          Start-Process -Wait -FilePath $installer -ArgumentList '/S', "/D=$installDir"
 
-      - name: Build signed macOS app
+      - name: Exercise previous-to-current update
+        shell: bash
         working-directory: powerai-desktop
-        env:
-          CI: "true"
-          POWERAI_RELEASE_BUILD: "1"
-          POWERAI_NOTARIZATION_MODE: deferred
-          CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
-          CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: bun run build-mac:arm64
-
-      - name: Submit app without waiting
-        env:
-          VERSION: ${{ needs.guard.outputs.version }}
-          DESKTOP_REF: ${{ inputs.desktop_ref }}
-          AGENT_REF: ${{ inputs.agent_ref }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_KEY_ISSUER: ${{ secrets.APPLE_API_KEY_ISSUER }}
         run: |
-          set -euo pipefail
-          app="powerai-desktop/out/mac-arm64/PowerAI.app"
-          pending="$RUNNER_TEMP/PowerAI-app-pending.zip"
-          codesign --verify --deep --strict --verbose=2 "$app"
-          node powerai-desktop/scripts/release/verify-native-module.mjs --app "$app"
-          ditto -c -k --sequesterRsrc --keepParent "$app" "$pending"
-          xcrun notarytool submit "$pending" \
-            --key "$APPLE_API_KEY_PATH" \
-            --key-id "$APPLE_API_KEY_ID" \
-            --issuer "$APPLE_API_KEY_ISSUER" \
-            --output-format json > "$RUNNER_TEMP/notary-submit.json"
-          submission_id="$(node -e "const value=require(process.argv[1]); if(!/^[0-9a-f-]{36}$/.test(value.id)) process.exit(1); process.stdout.write(value.id)" "$RUNNER_TEMP/notary-submit.json")"
-          node release-tools/scripts/release-state.mjs create \
-            "$RUNNER_TEMP/notary-state.json" \
-            "$VERSION" \
-            "$DESKTOP_REF" \
-            "$AGENT_REF" \
-            "$submission_id" \
-            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          bun tests/manual/auto-update/verify.mjs \
+            --executable="$RUNNER_TEMP/PowerAI/PowerAI.exe" \
+            --user-data-dir="$RUNNER_TEMP/user-data" \
+            --from="${{ needs.guard.outputs.previous_version }}" \
+            --to="${{ needs.guard.outputs.version }}" \
+            --evidence="$RUNNER_TEMP/update-acceptance-windows.json"
 
-      - name: Retain pending macOS app
+      - name: Retain update evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
         with:
-          name: macos-pending
-          if-no-files-found: error
-          retention-days: 14
-          path: |
-            ${{ runner.temp }}/PowerAI-app-pending.zip
-            ${{ runner.temp }}/notary-state.json
+          name: update-acceptance-windows-${{ needs.guard.outputs.previous_version }}-${{ needs.guard.outputs.version }}
+          if-no-files-found: warn
+          retention-days: 30
+          path: ${{ runner.temp }}/update-acceptance-windows.json
 
-  stage:
-    name: Stage atomic draft release
-    needs: [guard, macos-arm64, windows-x64]
+  cleanup-failed-candidate:
+    name: Withdraw failed Windows candidate
+    needs: [guard, publish-windows, windows-update-acceptance]
+    if: ${{ always() && needs.publish-windows.result == 'success' && needs.windows-update-acceptance.result != 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write
-    timeout-minutes: 10
+    timeout-minutes: 5
     steps:
-      - name: Download pending release assets
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
-        with:
-          path: build-artifacts
-
-      - name: Create private draft release
+      - name: Withdraw candidate and restore previous latest
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.guard.outputs.version }}
+          PREVIOUS_VERSION: ${{ needs.guard.outputs.previous_version }}
         run: |
           set -euo pipefail
-          tag="v$VERSION"
-          printf 'PowerAI %s internal test build.\n' "$VERSION" > release-notes.md
-          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target main --title "PowerAI $tag (pending notarization)" --notes-file release-notes.md \
-            build-artifacts/macos-pending/PowerAI-app-pending.zip \
-            build-artifacts/macos-pending/notary-state.json \
-            build-artifacts/windows-x64/*
+          if gh release view "v$VERSION" >/dev/null 2>&1; then
+            gh release delete "v$VERSION" --yes --cleanup-tag
+          fi
+          gh release edit "v$PREVIOUS_VERSION" --latest
