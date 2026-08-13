@@ -118,7 +118,7 @@ jobs:
       - name: Build native agent
         shell: bash
         run: |
-          bun install --cwd powerai-agent --frozen-lockfile
+          bun install --cwd powerai-agent --filter './packages/opencode' --filter './packages/app' --frozen-lockfile
           bun run --cwd powerai-agent/packages/opencode build -- --single --skip-install
 
       - name: Install desktop dependencies
