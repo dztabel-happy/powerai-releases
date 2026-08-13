@@ -59,28 +59,13 @@ test("release workflows keep private source and credentials behind manual releas
   );
   assert.match(build, /diff -u "\$RUNNER_TEMP\/local-hashes\.txt" "\$RUNNER_TEMP\/remote-hashes\.txt"/);
   assert.match(build, /gh release edit "\$tag" --repo "\$GITHUB_REPOSITORY" --draft=false --latest/);
-  assert.match(build, /windows-update-acceptance:/);
-  assert.match(build, /windows-update-acceptance:[\s\S]*?timeout-minutes: 60/);
-  assert.match(build, /tests\/manual\/auto-update\/verify\.mjs/);
   assert.match(
     build,
     /bun install --cwd powerai-agent --filter '\.\/packages\/opencode' --filter '\.\/packages\/app' --frozen-lockfile/,
   );
   assert.doesNotMatch(build, /bun install --cwd powerai-agent --frozen-lockfile/);
-  assert.doesNotMatch(
-    build.slice(
-      build.indexOf("  windows-update-acceptance:"),
-      build.indexOf("  cleanup-failed-candidate:"),
-    ),
-    /contents: write/,
-  );
-  assert.match(build, /cleanup-failed-candidate:/);
-  assert.match(
-    build,
-    /always\(\) && needs\.publish-windows\.result == 'success' && needs\.windows-update-acceptance\.result != 'success'/,
-  );
-  assert.match(build, /gh release delete "v\$VERSION" --repo "\$GITHUB_REPOSITORY" --yes --cleanup-tag/);
-  assert.match(build, /gh release edit "v\$PREVIOUS_VERSION" --repo "\$GITHUB_REPOSITORY" --latest/);
+  assert.doesNotMatch(build, /windows-update-acceptance:|tests\/manual\/auto-update\/verify\.mjs/);
+  assert.doesNotMatch(build, /cleanup-failed-candidate:|Withdraw failed Windows candidate/);
   assert.deepEqual(
     build
       .split("\n")
