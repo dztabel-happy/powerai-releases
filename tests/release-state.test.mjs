@@ -60,6 +60,7 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /diff -u "\$RUNNER_TEMP\/local-hashes\.txt" "\$RUNNER_TEMP\/remote-hashes\.txt"/);
   assert.match(build, /gh release edit "\$tag" --repo "\$GITHUB_REPOSITORY" --draft=false --latest/);
   assert.match(build, /windows-update-acceptance:/);
+  assert.match(build, /windows-update-acceptance:[\s\S]*?timeout-minutes: 60/);
   assert.match(build, /tests\/manual\/auto-update\/verify\.mjs/);
   assert.match(
     build,
