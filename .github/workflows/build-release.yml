@@ -225,7 +225,9 @@ jobs:
     needs: [guard, publish-windows]
     runs-on: windows-2025
     environment: release
-    timeout-minutes: 30
+    # The target build performs the one-time, checksum-verified LibreOffice
+    # bootstrap and real DOCX -> PDF probe before the app shell is released.
+    timeout-minutes: 60
     steps:
       - name: Checkout exact desktop acceptance harness
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
