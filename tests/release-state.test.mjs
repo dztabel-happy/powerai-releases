@@ -61,6 +61,11 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /gh release edit "\$tag" --repo "\$GITHUB_REPOSITORY" --draft=false --latest/);
   assert.match(build, /windows-update-acceptance:/);
   assert.match(build, /tests\/manual\/auto-update\/verify\.mjs/);
+  assert.match(
+    build,
+    /bun install --cwd powerai-agent --filter '\.\/packages\/opencode' --filter '\.\/packages\/app' --frozen-lockfile/,
+  );
+  assert.doesNotMatch(build, /bun install --cwd powerai-agent --frozen-lockfile/);
   assert.doesNotMatch(
     build.slice(
       build.indexOf("  windows-update-acceptance:"),
