@@ -53,6 +53,8 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /environment: release-approval/);
   assert.match(build, /needs: \[guard, windows-x64\]/);
   assert.match(build, /scripts\/windows-release\.mjs prepare/);
+  assert.match(build, /retention-days: 1/);
+  assert.doesNotMatch(build, /retention-days: (?:[2-9]|[1-9][0-9]+)/);
   assert.match(
     build,
     /gh release create "\$tag" --repo "\$GITHUB_REPOSITORY" --draft/,
