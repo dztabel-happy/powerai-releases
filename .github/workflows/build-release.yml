@@ -151,7 +151,7 @@ jobs:
         with:
           name: windows-x64
           if-no-files-found: error
-          retention-days: 14
+          retention-days: 1
           path: |
             powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe
             powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe.blockmap
