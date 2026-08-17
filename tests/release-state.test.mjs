@@ -54,6 +54,7 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /needs: \[guard, windows-x64\]/);
   assert.match(build, /scripts\/windows-release\.mjs prepare/);
   assert.match(build, /retention-days: 1/);
+  assert.match(build, /PowerAI-\$\{\{ needs\.guard\.outputs\.version \}\}-win-x64\.zip/);
   assert.doesNotMatch(build, /retention-days: (?:[2-9]|[1-9][0-9]+)/);
   assert.match(
     build,
@@ -91,9 +92,11 @@ test("Windows release assets are exact, self-consistent, and tamper evident", ()
   const version = "1.2.3";
   const installer = Buffer.from("installer");
   const blockmap = Buffer.from("blockmap");
+  const archive = Buffer.from("staged-zip");
   fs.mkdirSync(artifacts, { recursive: true });
   fs.writeFileSync(path.join(artifacts, `PowerAI-${version}-win-x64.exe`), installer);
   fs.writeFileSync(path.join(artifacts, `PowerAI-${version}-win-x64.exe.blockmap`), blockmap);
+  fs.writeFileSync(path.join(artifacts, `PowerAI-${version}-win-x64.zip`), archive);
   fs.writeFileSync(
     path.join(artifacts, "latest.yml"),
     [
@@ -120,7 +123,58 @@ test("Windows release assets are exact, self-consistent, and tamper evident", ()
   ]);
   execFileSync(process.execPath, [windowsScript, "verify", output, version]);
 
+  const manifest = JSON.parse(fs.readFileSync(path.join(output, "powerai-staged-update.json"), "utf8"));
+  assert.equal(manifest.schemaVersion, 1);
+  assert.equal(manifest.version, version);
+  assert.equal(manifest.zip.name, `PowerAI-${version}-win-x64.zip`);
+  assert.equal(manifest.zip.sha512, sha512(archive));
+  assert.equal(manifest.zip.size, archive.length);
+  const provenanceAssets = JSON.parse(
+    fs.readFileSync(path.join(output, "release-provenance.json"), "utf8"),
+  ).assets;
+  assert.ok(provenanceAssets[`PowerAI-${version}-win-x64.zip`]);
+  assert.ok(provenanceAssets["powerai-staged-update.json"]);
+
   fs.appendFileSync(path.join(output, `PowerAI-${version}-win-x64.exe`), "tampered");
+  assert.throws(() => execFileSync(process.execPath, [windowsScript, "verify", output, version], { stdio: "ignore" }));
+  fs.rmSync(directory, { recursive: true, force: true });
+});
+
+test("staged zip tampering is detected by verification", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "powerai-staged-zip-"));
+  const artifacts = path.join(directory, "artifacts", "windows-x64");
+  const output = path.join(directory, "release");
+  const version = "1.2.3";
+  const installer = Buffer.from("installer");
+  fs.mkdirSync(artifacts, { recursive: true });
+  fs.writeFileSync(path.join(artifacts, `PowerAI-${version}-win-x64.exe`), installer);
+  fs.writeFileSync(path.join(artifacts, `PowerAI-${version}-win-x64.exe.blockmap`), Buffer.from("blockmap"));
+  fs.writeFileSync(path.join(artifacts, `PowerAI-${version}-win-x64.zip`), Buffer.from("staged-zip"));
+  fs.writeFileSync(
+    path.join(artifacts, "latest.yml"),
+    [
+      `version: ${version}`,
+      "files:",
+      `  - url: PowerAI-${version}-win-x64.exe`,
+      `    sha512: ${sha512(installer)}`,
+      `    size: ${installer.length}`,
+      `path: PowerAI-${version}-win-x64.exe`,
+      `sha512: ${sha512(installer)}`,
+      "",
+    ].join("\n"),
+  );
+  execFileSync(process.execPath, [windowsScript, "prepare", path.join(directory, "artifacts"), output, version]);
+  execFileSync(process.execPath, [
+    windowsScript,
+    "provenance",
+    output,
+    version,
+    "a".repeat(40),
+    "b".repeat(40),
+    "https://github.com/dztabel-happy/powerai-releases/actions/runs/1",
+  ]);
+
+  fs.appendFileSync(path.join(output, `PowerAI-${version}-win-x64.zip`), "tampered");
   assert.throws(() => execFileSync(process.execPath, [windowsScript, "verify", output, version], { stdio: "ignore" }));
   fs.rmSync(directory, { recursive: true, force: true });
 });

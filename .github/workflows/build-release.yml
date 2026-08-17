@@ -155,6 +155,7 @@ jobs:
           path: |
             powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe
             powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe.blockmap
+            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.zip
             powerai-desktop/out/latest.yml
 
   publish-windows:

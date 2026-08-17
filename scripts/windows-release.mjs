@@ -58,9 +58,44 @@ function metadata(file) {
   return { version: scalar(version.replace(/^version:\s*/, "")), entries };
 }
 
+const STAGED_MANIFEST_NAME = "powerai-staged-update.json";
+
 function names(version) {
   const installer = `PowerAI-${version}-win-x64.exe`;
-  return [installer, `${installer}.blockmap`, "latest.yml"];
+  return [installer, `${installer}.blockmap`, "latest.yml", `PowerAI-${version}-win-x64.zip`];
+}
+
+/**
+ * Sidecar consumed by the desktop staged updater: it downloads and verifies
+ * the zip against this manifest, pre-extracts it while the app runs, and
+ * swaps directories at restart instead of running the NSIS installer.
+ */
+function writeStagedManifest(directory, version) {
+  const zipName = `PowerAI-${version}-win-x64.zip`;
+  const zipPath = path.join(directory, zipName);
+  fs.writeFileSync(
+    path.join(directory, STAGED_MANIFEST_NAME),
+    `${JSON.stringify(
+      {
+        schemaVersion: 1,
+        version,
+        zip: { name: zipName, sha512: hash(zipPath, "sha512", "base64"), size: fs.statSync(zipPath).size },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+}
+
+function verifyStagedManifest(directory, version) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, STAGED_MANIFEST_NAME), "utf8"));
+  const zipName = `PowerAI-${version}-win-x64.zip`;
+  if (manifest.schemaVersion !== 1) fail("Staged manifest has an invalid schema version");
+  if (manifest.version !== version) fail(`Staged manifest version ${manifest.version} does not match ${version}`);
+  if (manifest.zip?.name !== zipName) fail(`Staged manifest does not reference ${zipName}`);
+  const zipPath = path.join(directory, zipName);
+  if (manifest.zip.sha512 !== hash(zipPath, "sha512", "base64")) fail("Staged manifest zip sha512 does not match");
+  if (manifest.zip.size !== fs.statSync(zipPath).size) fail("Staged manifest zip size does not match");
 }
 
 function verifyMetadata(directory, version) {
@@ -72,6 +107,7 @@ function verifyMetadata(directory, version) {
   const file = path.join(directory, installer);
   if (entry.sha512 !== hash(file, "sha512", "base64")) fail("latest.yml installer sha512 does not match");
   if (entry.size !== fs.statSync(file).size) fail("latest.yml installer size does not match");
+  verifyStagedManifest(directory, version);
 }
 
 function prepare(artifacts, output, version) {
@@ -80,6 +116,7 @@ function prepare(artifacts, output, version) {
   fs.rmSync(output, { recursive: true, force: true });
   fs.mkdirSync(output, { recursive: true });
   for (const name of names(version)) fs.copyFileSync(findUnique(files, name), path.join(output, name));
+  writeStagedManifest(output, version);
   verifyMetadata(output, version);
 }
 
@@ -119,7 +156,7 @@ function provenance(directory, version, desktopCommit, agentCommit, workflowRun)
 }
 
 function verify(directory, version) {
-  const expected = [...names(version), "release-provenance.json"].sort();
+  const expected = [...names(version), STAGED_MANIFEST_NAME, "release-provenance.json"].sort();
   const actual = fs.readdirSync(directory).sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) fail("Release directory contains missing or unexpected files");
   verifyMetadata(directory, version);
