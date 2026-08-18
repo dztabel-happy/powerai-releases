@@ -6,7 +6,7 @@ on:
       officecli_version:
         description: 'OfficeCLI release version to certify (must match the pin in powerai-desktop scripts/prepareBundledOfficeCli.js)'
         required: false
-        default: '1.0.136'
+        default: '1.0.144'
 
 permissions:
   contents: read
@@ -40,6 +40,10 @@ jobs:
 
       - name: Run the command battery
         shell: pwsh
+        env:
+          # Battery must certify the pinned binary itself — never let the
+          # CLI self-update mid-run and change what is being measured.
+          OFFICECLI_SKIP_UPDATE: '1'
         run: |
           $ErrorActionPreference = 'Continue'
           $bin = "$PWD\officecli.exe"
