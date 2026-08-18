@@ -1,0 +1,93 @@
+name: Test OfficeCLI on Windows
+
+on:
+  workflow_dispatch:
+    inputs:
+      officecli_version:
+        description: 'OfficeCLI release version to certify (must match the pin in powerai-desktop scripts/prepareBundledOfficeCli.js)'
+        required: false
+        default: '1.0.136'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-officecli-battery:
+    name: Certify bundled OfficeCLI binary on clean Windows
+    runs-on: windows-2025
+    timeout-minutes: 20
+    steps:
+      - name: Download and checksum-verify officecli-win-x64.exe
+        shell: pwsh
+        run: |
+          $version = '${{ inputs.officecli_version }}'
+          $base = "https://github.com/iOfficeAI/OfficeCLI/releases/download/v$version"
+          Invoke-WebRequest -Uri "$base/SHA256SUMS" -OutFile SHA256SUMS
+          Invoke-WebRequest -Uri "$base/officecli-win-x64.exe" -OutFile officecli.exe
+          $expected = (Select-String -Path SHA256SUMS -Pattern 'officecli-win-x64\.exe').Line -split '\s+' | Select-Object -First 1
+          $actual = (Get-FileHash officecli.exe -Algorithm SHA256).Hash.ToLower()
+          Write-Host "expected=$expected actual=$actual"
+          if ($actual -ne $expected) { throw "checksum mismatch" }
+
+      - name: Windows Defender verdict on the binary (best effort)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Start-MpScan -ScanPath "$PWD\officecli.exe" -ScanType CustomScan
+          Get-MpThreatDetection | Format-List
+          if (-not (Test-Path "$PWD\officecli.exe")) { throw "Defender removed the binary" }
+          Write-Host "binary still present after scan"
+
+      - name: Run the command battery
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Continue'
+          $bin = "$PWD\officecli.exe"
+          $work = "$PWD\battery"
+          New-Item -ItemType Directory -Path $work | Out-Null
+          Set-Location $work
+          "a,b`n1,2`n3,4`n" | Set-Content data.csv
+
+          $failures = 0
+          function Run {
+            param([string[]]$CliArgs)
+            $display = $CliArgs -join ' '
+            Write-Host "=== officecli $display"
+            $out = & $bin @CliArgs 2>&1
+            $code = $LASTEXITCODE
+            $out | ForEach-Object { Write-Host "    $_" }
+            if ($code -ne 0) {
+              Write-Host "!!! EXIT $code for: officecli $display"
+              $script:failures++
+            }
+          }
+
+          Run @('--version')
+          Run @('create', 't.docx')
+          Run @('create', 't.xlsx')
+          Run @('create', 't.pptx')
+          # docx: content, readback, HTML render (XML-heavy paths)
+          Run @('add', 't.docx', '/body', '--type', 'paragraph', '--prop', 'text=hello world 你好')
+          Run @('view', 't.docx', 'outline')
+          Run @('view', 't.docx', 'html')
+          Run @('validate', 't.docx')
+          # xlsx: values, formulas, csv import, chart, HTML render
+          Run @('set', 't.xlsx', '/Sheet1/A1', '--prop', 'value=Month')
+          Run @('set', 't.xlsx', '/Sheet1/B1', '--prop', 'value=42')
+          Run @('set', 't.xlsx', '/Sheet1/B2', '--prop', 'formula=SUM(B1:B1)')
+          Run @('import', 't.xlsx', '/Sheet1', '--file', 'data.csv', '--header')
+          Run @('add', 't.xlsx', '/Sheet1', '--type', 'chart', '--prop', 'type=bar', '--prop', 'dataRange=Sheet1!A1:B3')
+          Run @('get', 't.xlsx', '/Sheet1/A1')
+          Run @('view', 't.xlsx', 'outline')
+          Run @('view', 't.xlsx', 'html')
+          Run @('validate', 't.xlsx')
+          # pptx: HTML render + validate
+          Run @('view', 't.pptx', 'html')
+          Run @('validate', 't.pptx')
+          # resident lifecycle teardown
+          Run @('close', 't.docx')
+          Run @('close', 't.xlsx')
+          Run @('close', 't.pptx')
+
+          if ($failures -gt 0) { throw "$failures command(s) failed" }
+          Write-Host "BATTERY PASSED: every command exited 0"
