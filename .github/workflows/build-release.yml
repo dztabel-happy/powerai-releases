@@ -205,7 +205,11 @@ jobs:
             fi
           }
           trap cleanup ERR
-          printf 'PowerAI %s Windows x64 internal test build. The installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          if [[ "$VERSION" == *-* ]]; then
+            printf 'PowerAI %s Windows x64 DEV build (prerelease). Only clients that opted into prerelease updates receive it. The installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          else
+            printf 'PowerAI %s Windows x64 internal test build. The installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+          fi
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target main --title "PowerAI $tag" --notes-file "$RUNNER_TEMP/release-notes.md" \
             "$RUNNER_TEMP/release-assets"/*
           release_created=true
@@ -216,5 +220,11 @@ jobs:
           (cd "$RUNNER_TEMP/release-assets" && sha256sum * | sort -k2) > "$RUNNER_TEMP/local-hashes.txt"
           (cd "$RUNNER_TEMP/remote-check" && sha256sum * | sort -k2) > "$RUNNER_TEMP/remote-hashes.txt"
           diff -u "$RUNNER_TEMP/local-hashes.txt" "$RUNNER_TEMP/remote-hashes.txt"
-          gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          # A dev build is a prerelease: it must never take the "latest"
+          # pointer, which is what unopted clients and the mirror follow.
+          if [[ "$VERSION" == *-* ]]; then
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
+          fi
           release_created=false
