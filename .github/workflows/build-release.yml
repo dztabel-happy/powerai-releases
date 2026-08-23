@@ -146,6 +146,23 @@ jobs:
           if (-not (Test-Path $installer)) { throw "Missing $installer" }
           if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'NotSigned') { throw 'Expected unsigned internal installer' }
 
+      - name: Verify packaged spreadsheet preview budget
+        shell: pwsh
+        working-directory: powerai-desktop
+        run: |
+          $executable = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
+          $evidence = Join-Path $env:RUNNER_TEMP 'spreadsheet-preview-budget-windows.json'
+          bun tests/manual/spreadsheet-preview-budget/verify.ts "--executable=$executable" "--evidence=$evidence"
+
+      - name: Retain spreadsheet preview evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: spreadsheet-preview-budget-windows
+          if-no-files-found: warn
+          retention-days: 1
+          path: ${{ runner.temp }}/spreadsheet-preview-budget-windows.json
+
       - name: Retain Windows artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
