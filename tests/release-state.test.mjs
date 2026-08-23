@@ -55,6 +55,8 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /scripts\/windows-release\.mjs prepare/);
   assert.match(build, /retention-days: 1/);
   assert.match(build, /PowerAI-\$\{\{ needs\.guard\.outputs\.version \}\}-win-x64\.zip/);
+  assert.match(build, /tests\/manual\/spreadsheet-preview-budget\/verify\.ts/);
+  assert.match(build, /spreadsheet-preview-budget-windows\.json/);
   assert.doesNotMatch(build, /retention-days: (?:[2-9]|[1-9][0-9]+)/);
   assert.match(
     build,
