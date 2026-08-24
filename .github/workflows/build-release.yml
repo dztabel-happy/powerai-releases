@@ -232,7 +232,7 @@ jobs:
           if [[ "$VERSION" == *-* ]]; then
             printf 'PowerAI %s Windows x64 DEV build (prerelease). Only clients that opted into prerelease updates receive it. The installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
           else
-            printf 'PowerAI %s Windows x64 internal test build. The installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+            printf 'PowerAI %s Windows x64 stable release — every client receives it through automatic updates. The installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
           fi
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --draft --target main --title "PowerAI $tag" --notes-file "$RUNNER_TEMP/release-notes.md" \
             "$RUNNER_TEMP/release-assets"/*
