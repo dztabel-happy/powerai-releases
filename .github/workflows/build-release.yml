@@ -146,16 +146,12 @@ jobs:
           if (-not (Test-Path $installer)) { throw "Missing $installer" }
           if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'NotSigned') { throw 'Expected unsigned internal installer' }
 
-      # Advisory while the harness earns its stripes: five consecutive release
-      # runs were blocked by scaffold-level failures (CDP handshake, process
-      # tree, temp-dir locks, panel-mount race) with no product defect behind
-      # any of them. The step runs, uploads full evidence (state snapshot,
-      # screenshot, app log), and annotates a warning on failure — it stops
-      # blocking the release until it has proven two consecutive green runs,
-      # after which drop continue-on-error to promote it back to a gate.
-      - name: Verify packaged spreadsheet preview budget (advisory)
+      # Promoted back to a blocking gate after the agreed two consecutive
+      # green advisory runs (v0.1.34-dev.26 and dev.27). A failure here now
+      # stops the release; the evidence artifact below carries the state
+      # snapshot, screenshot and app log for diagnosis.
+      - name: Verify packaged spreadsheet preview budget
         id: spreadsheet_budget
-        continue-on-error: true
         shell: pwsh
         working-directory: powerai-desktop
         run: |
@@ -164,12 +160,6 @@ jobs:
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           $evidence = Join-Path $evidenceDir 'evidence.json'
           bun tests/manual/spreadsheet-preview-budget/verify.ts "--executable=$executable" "--evidence=$evidence"
-
-      - name: Flag advisory spreadsheet acceptance failure
-        if: steps.spreadsheet_budget.outcome == 'failure'
-        shell: pwsh
-        run: |
-          Write-Output "::warning title=Spreadsheet acceptance failed (advisory)::The packaged spreadsheet preview acceptance failed. The release continues; inspect the spreadsheet-preview-budget-windows artifact (evidence.json, failure-context.json, failure-screenshot.png, main-process.log)."
 
       - name: Retain spreadsheet preview evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
