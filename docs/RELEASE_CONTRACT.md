@@ -98,8 +98,14 @@ macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep
 `spctl --assess` 放行。这三项由 `finalize-notarization` 强制执行，任何一项不过
 就不追加 macOS 制品。
 
-macOS 自动更新（旧版→新版）尚未在公开流水线上验收过。首个 macOS dev 版发布后
-必须补做，未完成前不得据此宣布 macOS 升级链路可用。
+macOS 自动更新（旧版→新版）已于 2026-08-31 在 `v0.1.38-dev.1` 上验收：本机
+0.1.0 arm64 包在隔离环境启动，从镜像 dev 通道解析出 `latest-arm64` 频道、发现
+`0.1.38-dev.1`、下载 337MB zip 并通过 sha512 校验，界面给出"重启更新"。落盘
+文件的 sha512 与 Release 中的制品逐字节一致。
+
+后续每个引入 macOS 制品的版本沿用同一路径复核：装订后的 dmg 与 zip 内 .app 都
+必须 `spctl --assess` 放行，且 `latest-mac.yml` 声明的 sha512 必须等于 Release
+上实际制品的 sha512——dmg 在 staple 后字节会变，只有 `sync-dmg` 刷新过才成立。
 
 ## 7. 回滚
 
