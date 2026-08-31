@@ -66,10 +66,11 @@ function metadata(file) {
 function names(version) {
   const dmg = `PowerAI-${version}-mac-arm64.dmg`;
   const zip = `PowerAI-${version}-mac-arm64.zip`;
-  // electron-updater downloads the zip; the dmg is the manual download. Both
-  // blockmaps are published because the previous contract published them, and
-  // silently dropping an asset is not what a staging change should do.
-  return [dmg, `${dmg}.blockmap`, zip, `${zip}.blockmap`, "latest-arm64-mac.yml", "latest-mac.yml"];
+  // No dmg blockmap: the disk image is notarized and stapled AFTER
+  // electron-builder writes it, so any blockmap made alongside it describes
+  // bytes that no longer exist. Nothing consumes it either — electron-updater
+  // updates from the zip, and the dmg is the manual download.
+  return [dmg, zip, `${zip}.blockmap`, "latest-arm64-mac.yml", "latest-mac.yml"];
 }
 
 function prepare(buildDir, outputDir, version) {
@@ -80,7 +81,6 @@ function prepare(buildDir, outputDir, version) {
   fs.mkdirSync(outputDir, { recursive: true });
   for (const basename of [
     `PowerAI-${version}-mac-arm64.dmg`,
-    `PowerAI-${version}-mac-arm64.dmg.blockmap`,
     `PowerAI-${version}-mac-arm64.zip`,
     `PowerAI-${version}-mac-arm64.zip.blockmap`,
   ]) {
@@ -120,11 +120,53 @@ function verify(outputDir, version) {
   }
 }
 
+/**
+ * Stapling the notarization ticket onto the disk image rewrites its bytes,
+ * which invalidates the sha512 and size electron-builder recorded for it.
+ * The zip is never restapled, so its entry stays authoritative; only the dmg
+ * entry is refreshed, and only from the file that will actually be published.
+ */
+function syncDmg(outputDir, version) {
+  if (!versionPattern.test(version)) fail("Version must be exact semver");
+  const dmg = `PowerAI-${version}-mac-arm64.dmg`;
+  const dmgPath = path.join(outputDir, dmg);
+  if (!fs.existsSync(dmgPath)) fail(`Missing ${dmg}`);
+  const digest = crypto.createHash("sha512").update(fs.readFileSync(dmgPath)).digest("base64");
+  const size = fs.statSync(dmgPath).size;
+  let rewritten = 0;
+  for (const name of ["latest-arm64-mac.yml", "latest-mac.yml"]) {
+    const file = path.join(outputDir, name);
+    if (!fs.existsSync(file)) fail(`Missing ${name}`);
+    const lines = fs.readFileSync(file, "utf8").split(/\r?\n/);
+    let inDmgEntry = false;
+    let touched = false;
+    const out = lines.map((line) => {
+      const url = line.match(/^\s*-\s+url:\s*(.+)$/);
+      if (url) inDmgEntry = scalar(url[1]) === dmg;
+      if (!inDmgEntry) return line;
+      if (/^\s+sha512:\s*/.test(line)) {
+        touched = true;
+        return line.replace(/sha512:\s*.+$/, `sha512: ${digest}`);
+      }
+      if (/^\s+size:\s*/.test(line)) {
+        touched = true;
+        return line.replace(/size:\s*.+$/, `size: ${size}`);
+      }
+      return line;
+    });
+    if (!touched) fail(`${name} has no ${dmg} entry to refresh`);
+    fs.writeFileSync(file, out.join("\n"));
+    rewritten += 1;
+  }
+  if (rewritten !== 2) fail("Expected to refresh both updater manifests");
+}
+
 const [command, ...args] = process.argv.slice(2);
 try {
   if (command === "prepare" && args.length === 3) prepare(args[0], args[1], args[2]);
+  else if (command === "sync-dmg" && args.length === 2) syncDmg(args[0], args[1]);
   else if (command === "verify" && args.length === 2) verify(args[0], args[1]);
-  else fail("Usage: macos-release.mjs prepare <build-dir> <output> <version> | verify <output> <version>");
+  else fail("Usage: macos-release.mjs prepare <build-dir> <output> <version> | sync-dmg <output> <version> | verify <output> <version>");
 } catch (error) {
   console.error(error.message);
   process.exit(1);

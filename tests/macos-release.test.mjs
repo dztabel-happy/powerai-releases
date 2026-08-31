@@ -35,7 +35,6 @@ function buildDir({ extraFile } = {}) {
   const zip = path.join(build, `PowerAI-${version}-mac-arm64.zip`);
   const blockmap = path.join(build, `PowerAI-${version}-mac-arm64.zip.blockmap`);
   fs.writeFileSync(dmg, "disk-image");
-  fs.writeFileSync(`${dmg}.blockmap`, "dmg-blocks");
   fs.writeFileSync(zip, "update-archive");
   fs.writeFileSync(blockmap, "blocks");
   fs.writeFileSync(
@@ -46,6 +45,9 @@ function buildDir({ extraFile } = {}) {
       `  - url: PowerAI-${version}-mac-arm64.zip`,
       `    sha512: ${sha512(zip)}`,
       `    size: ${fs.statSync(zip).size}`,
+      `  - url: PowerAI-${version}-mac-arm64.dmg`,
+      `    sha512: ${sha512(dmg)}`,
+      `    size: ${fs.statSync(dmg).size}`,
       `path: PowerAI-${version}-mac-arm64.zip`,
       "",
     ].join("\n"),
@@ -59,7 +61,6 @@ test("staging carries exactly the macOS assets and both updater manifests", () =
   run("prepare", build, output, version);
   assert.deepEqual(fs.readdirSync(output).sort(), [
     `PowerAI-${version}-mac-arm64.dmg`,
-    `PowerAI-${version}-mac-arm64.dmg.blockmap`,
     `PowerAI-${version}-mac-arm64.zip`,
     `PowerAI-${version}-mac-arm64.zip.blockmap`,
     "latest-arm64-mac.yml",
@@ -119,4 +120,45 @@ test("a missing build artifact fails staging instead of publishing a partial set
   const { build, output } = buildDir();
   fs.rmSync(path.join(build, `PowerAI-${version}-mac-arm64.dmg`));
   assert.match(expectFailure("prepare", build, output, version), /Expected exactly one/);
+});
+
+test("stapling the disk image invalidates the manifest until it is synced", () => {
+  const { build, output } = buildDir();
+  run("prepare", build, output, version);
+  run("verify", output, version);
+
+  // What `xcrun stapler staple` does to the dmg: same file, different bytes.
+  const dmg = path.join(output, `PowerAI-${version}-mac-arm64.dmg`);
+  fs.writeFileSync(dmg, "disk-image-with-stapled-ticket");
+  assert.match(expectFailure("verify", output, version), /invalid sha512|invalid size/);
+
+  run("sync-dmg", output, version);
+  run("verify", output, version);
+});
+
+test("syncing refreshes only the disk image entry, never the archive's", () => {
+  const { build, output } = buildDir();
+  run("prepare", build, output, version);
+  const before = fs.readFileSync(path.join(output, "latest-mac.yml"), "utf8");
+  const zipDigest = before.match(/sha512: (\S+)/)[1];
+
+  fs.writeFileSync(path.join(output, `PowerAI-${version}-mac-arm64.dmg`), "restapled");
+  run("sync-dmg", output, version);
+
+  const after = fs.readFileSync(path.join(output, "latest-mac.yml"), "utf8");
+  // The zip is never restapled: electron-updater's download must keep matching
+  // the digest electron-builder measured.
+  assert.equal(after.match(/sha512: (\S+)/)[1], zipDigest);
+  run("verify", output, version);
+});
+
+test("syncing a manifest that never described the disk image is an error", () => {
+  const { build, output } = buildDir();
+  run("prepare", build, output, version);
+  const file = path.join(output, "latest-arm64-mac.yml");
+  fs.writeFileSync(
+    file,
+    fs.readFileSync(file, "utf8").replace(new RegExp(`  - url: PowerAI-${version}-mac-arm64\\.dmg[\\s\\S]*?size: \\d+\n`), ""),
+  );
+  assert.match(expectFailure("sync-dmg", output, version), /no PowerAI.*\.dmg entry to refresh/);
 });

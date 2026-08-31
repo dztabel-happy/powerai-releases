@@ -196,6 +196,34 @@ jobs:
               --publish never \
               --config.directories.output="$RUNNER_TEMP/final-mac"
           )
+          # The app inside is notarized and stapled, but a downloaded disk image
+          # is assessed on its own — and electron-builder does not sign the
+          # container (verified: `code object is not signed at all`). So the
+          # dmg gets its own notarization. This one is fast: the notary service
+          # has already scanned the payload, and unlike the first submission
+          # there is nothing to gain by deferring a wait that ends in minutes.
+          # A timeout here simply fails the run; the marker survives and the
+          # next poll redoes this idempotently.
+          xcrun notarytool submit "$RUNNER_TEMP/final-mac/PowerAI-$VERSION-mac-arm64.dmg" \
+            --key "$APPLE_API_KEY_PATH" \
+            --key-id "$APPLE_API_KEY_ID" \
+            --issuer "$APPLE_API_KEY_ISSUER" \
+            --wait \
+            --timeout 30m \
+            --output-format json > "$RUNNER_TEMP/dmg-notary.json"
+          dmg_status="$(node -e "const value=require(process.argv[1]); process.stdout.write(value.status)" "$RUNNER_TEMP/dmg-notary.json")"
+          if [ "$dmg_status" != 'Accepted' ]; then
+            xcrun notarytool log \
+              "$(node -e "const value=require(process.argv[1]); process.stdout.write(value.id)" "$RUNNER_TEMP/dmg-notary.json")" \
+              --key "$APPLE_API_KEY_PATH" \
+              --key-id "$APPLE_API_KEY_ID" \
+              --issuer "$APPLE_API_KEY_ISSUER" \
+              "$RUNNER_TEMP/dmg-notary-log.json" || true
+            cat "$RUNNER_TEMP/dmg-notary-log.json" || true
+            echo "Disk image notarization returned $dmg_status" >&2
+            exit 1
+          fi
+          xcrun stapler staple "$RUNNER_TEMP/final-mac/PowerAI-$VERSION-mac-arm64.dmg"
           spctl --assess --type open --context context:primary-signature --verbose=4 \
             "$RUNNER_TEMP/final-mac/PowerAI-$VERSION-mac-arm64.dmg"
 
@@ -209,6 +237,8 @@ jobs:
           # desktop commit: the finalizer must behave the same for every
           # pending release, including ones built before it was written.
           node scripts/macos-release.mjs prepare "$RUNNER_TEMP/final-mac" "$RUNNER_TEMP/release-assets" "$VERSION"
+          # Stapling rewrote the disk image after electron-builder measured it.
+          node scripts/macos-release.mjs sync-dmg "$RUNNER_TEMP/release-assets" "$VERSION"
           node scripts/macos-release.mjs verify "$RUNNER_TEMP/release-assets" "$VERSION"
 
       - name: Publish only after byte-for-byte verification
