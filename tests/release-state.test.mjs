@@ -131,7 +131,16 @@ test("release workflows keep private source and credentials behind manual releas
   // macOS appends to a published release: it must never restage or re-upload
   // the Windows assets, and must not re-assert the release pointer.
   assert.match(finalize, /scripts\/macos-release\.mjs prepare/);
+  assert.match(finalize, /scripts\/macos-release\.mjs sync-dmg/);
   assert.match(finalize, /scripts\/macos-release\.mjs verify/);
+  // A downloaded disk image is assessed on its own, and electron-builder does
+  // not sign the container — so the dmg carries its own notarization, and the
+  // staple that follows must happen before the manifest is measured.
+  assert.match(finalize, /notarytool submit "\$RUNNER_TEMP\/final-mac[^\n]*\n[\s\S]{0,400}?--wait/);
+  assert.ok(
+    finalize.indexOf('stapler staple "$RUNNER_TEMP/final-mac') < finalize.indexOf("macos-release.mjs prepare"),
+  );
+  assert.ok(finalize.indexOf("macos-release.mjs sync-dmg") < finalize.indexOf("macos-release.mjs verify"));
   assert.doesNotMatch(finalize, /assets\.mjs (?:prepare|provenance|verify)/);
   assert.doesNotMatch(finalize, /gh release edit[^\n]*--latest/);
   assert.doesNotMatch(finalize, /gh release edit[^\n]*--prerelease/);
