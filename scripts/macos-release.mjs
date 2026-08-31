@@ -64,8 +64,12 @@ function metadata(file) {
 }
 
 function names(version) {
+  const dmg = `PowerAI-${version}-mac-arm64.dmg`;
   const zip = `PowerAI-${version}-mac-arm64.zip`;
-  return [`PowerAI-${version}-mac-arm64.dmg`, zip, `${zip}.blockmap`, "latest-arm64-mac.yml", "latest-mac.yml"];
+  // electron-updater downloads the zip; the dmg is the manual download. Both
+  // blockmaps are published because the previous contract published them, and
+  // silently dropping an asset is not what a staging change should do.
+  return [dmg, `${dmg}.blockmap`, zip, `${zip}.blockmap`, "latest-arm64-mac.yml", "latest-mac.yml"];
 }
 
 function prepare(buildDir, outputDir, version) {
@@ -76,6 +80,7 @@ function prepare(buildDir, outputDir, version) {
   fs.mkdirSync(outputDir, { recursive: true });
   for (const basename of [
     `PowerAI-${version}-mac-arm64.dmg`,
+    `PowerAI-${version}-mac-arm64.dmg.blockmap`,
     `PowerAI-${version}-mac-arm64.zip`,
     `PowerAI-${version}-mac-arm64.zip.blockmap`,
   ]) {

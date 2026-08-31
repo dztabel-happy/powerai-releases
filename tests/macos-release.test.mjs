@@ -35,6 +35,7 @@ function buildDir({ extraFile } = {}) {
   const zip = path.join(build, `PowerAI-${version}-mac-arm64.zip`);
   const blockmap = path.join(build, `PowerAI-${version}-mac-arm64.zip.blockmap`);
   fs.writeFileSync(dmg, "disk-image");
+  fs.writeFileSync(`${dmg}.blockmap`, "dmg-blocks");
   fs.writeFileSync(zip, "update-archive");
   fs.writeFileSync(blockmap, "blocks");
   fs.writeFileSync(
@@ -58,6 +59,7 @@ test("staging carries exactly the macOS assets and both updater manifests", () =
   run("prepare", build, output, version);
   assert.deepEqual(fs.readdirSync(output).sort(), [
     `PowerAI-${version}-mac-arm64.dmg`,
+    `PowerAI-${version}-mac-arm64.dmg.blockmap`,
     `PowerAI-${version}-mac-arm64.zip`,
     `PowerAI-${version}-mac-arm64.zip.blockmap`,
     "latest-arm64-mac.yml",
