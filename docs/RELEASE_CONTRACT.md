@@ -18,9 +18,15 @@
 
 ## 3. 必需制品
 
-当前发布通道仅提供 Windows x64 内测版。Windows 安装包暂不签名，Release 说明必须明确标注；macOS 构建、公证和发布均暂停，不进入当前流水线。
+当前发布通道提供 Windows x64 与 macOS arm64。Windows 安装包暂不签名，Release 说明必须明确标注；macOS 用 Developer ID 签名并经 Apple 公证。
 
-### macOS（暂停）
+两条产线**互不阻塞**：Windows 构建完立即发布；macOS 提交 Apple 后不等待，由
+`finalize-notarization` 轮询，公证通过后把 macOS 制品追加到同一个 Release。
+Apple 排队时间不可预测，让发布等它是 2026-08 之前 macOS 停滞的直接原因。
+
+macOS 仅提供 arm64（Apple Silicon）。Intel 机型不在当前发布范围内。
+
+### macOS arm64
 
 - `PowerAI-X.Y.Z-mac-arm64.dmg`
 - `PowerAI-X.Y.Z-mac-arm64.zip`
@@ -37,11 +43,30 @@
 
 ## 4. 原子发布
 
+原子性以**平台**为单位，不以 Release 为单位：每个平台的安装包与它的更新元数据
+必须同时出现，跨平台则允许先后。macOS 要等 Apple 公证，而 Apple 的排队时间没有
+上界；把整个 Release 绑在它上面，就是 2026-08 之前 macOS 停滞的直接原因。
+
+Windows（发布时立即完成）：
+
 1. 从固定且已合并的源代码提交构建。
-2. 完成本仓库的制品验证及适用于当前平台的签名要求。
-3. 创建 Draft Release 并上传全部制品。
+2. 完成制品验证。
+3. 创建 Draft Release 并上传 Windows 全部制品。
 4. 校验文件名、版本、大小、摘要和更新元数据引用。
-5. 重新下载远端制品并与本地制品逐字节核对，全部一致后转为 latest。
+5. 重新下载远端制品逐字节核对，一致后转为正式（dev 版标记 prerelease 且不取 latest）。
+
+macOS（公证通过后追加到同一个 Release）：
+
+1. 与 Windows 同一次运行、同一组提交，签名后提交 Apple，**不等待结果**。
+2. 已发布的 Release 上挂 `notary-state.json` 作为待办标记。
+3. `finalize-notarization` 轮询；Apple 判定 Accepted 后 staple、重建 dmg/zip。
+4. 只校验并**追加** macOS 制品与 `latest-arm64-mac.yml`/`latest-mac.yml`，
+   逐字节核对。**不得重传 Windows 制品**（它们已在公开下载中），
+   **不得重设 Release 的 latest 指针**（该指针属于发布它的那条产线；在这里重设
+   等于把它交给最后完成公证的版本，而那未必是最新版本）。
+5. 终态必须清除标记：Accepted 追加后清除；Invalid 上传 Apple 日志、改标题后清除；
+   待公证包超出保留期后改标题并清除。轮询按计划运行，留下无法完成的标记
+   等于每 30 分钟失败一次，永不停止。
 
 禁止先发布更新元数据、后补安装包；否则客户端可能发现一个无法下载的版本。
 
@@ -68,9 +93,13 @@
 
 上述验收用于确认真实机器上的 Windows Installer、网络、LibreOffice、原生窗控和用户数据行为，不阻塞内测安装包发布。发现问题时停止该版本分发，并以更高版本修复。
 
-macOS 恢复发布前，必须重新启用 Developer ID 签名、公证、Gatekeeper 和完整旧版到新版升级验收，不得复用 Windows-only 发布结论。
+macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep --strict`
+且 Authority 为 Developer ID Application）、Apple 公证通过并 staple、
+`spctl --assess` 放行。这三项由 `finalize-notarization` 强制执行，任何一项不过
+就不追加 macOS 制品。
 
-macOS 暂停期间只允许在开发者 Mac 上本地构建和测试，不生成公开制品，也不进入公开 CI。
+macOS 自动更新（旧版→新版）尚未在公开流水线上验收过。首个 macOS dev 版发布后
+必须补做，未完成前不得据此宣布 macOS 升级链路可用。
 
 ## 7. 回滚
 
@@ -79,5 +108,7 @@ macOS 暂停期间只允许在开发者 Mac 上本地构建和测试，不生成
 ## 8. 制品保留
 
 - GitHub Release 中的安装包、更新元数据和来源证明是发布记录，不自动删除。
-- GitHub Actions 构建中间产物只用于同一次工作流内传递，保留 1 天后自动清理。
+- GitHub Actions 构建中间产物保留 1 天，只用于同一次工作流内传递。唯一例外是
+  待公证的 macOS 签名包（`macos-pending`，保留 14 天）：它要跨工作流交给
+  `finalize-notarization`，且必须活过 Apple 的排队时间。诊断证据保留 3 天。
 - 清理 Actions 中间产物不得删除 Release 资产，也不得改变已发布版本。
