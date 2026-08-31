@@ -98,9 +98,11 @@ test("release workflows keep private source and credentials behind manual releas
 
   // The macOS lane must never gate the Windows publish: Apple's queue is
   // unbounded, and gating on it is what stalled macOS releases before.
-  assert.match(build, /^  macos-arm64:$/m);
-  assert.match(build, /needs: \[guard, approve\]/);
-  assert.doesNotMatch(build, /needs: \[guard, macos-arm64, windows-x64\]/);
+  const macJob = build.slice(build.indexOf("\n  macos-arm64:"), build.indexOf("\n  mark-macos-pending:"));
+  assert.ok(macJob.length > 0);
+  assert.match(macJob, /needs: \[guard, approve\]/);
+  const windowsPublish = build.slice(build.indexOf("\n  publish-windows:"));
+  assert.doesNotMatch(windowsPublish.split("\n").slice(0, 6).join("\n"), /macos/);
   assert.match(build, /POWERAI_NOTARIZATION_MODE: deferred/);
   assert.match(build, /xcrun notarytool submit/);
   assert.doesNotMatch(build, /notarytool submit[\s\S]{0,400}--wait/);
@@ -119,10 +121,37 @@ test("release workflows keep private source and credentials behind manual releas
   assert.doesNotMatch(finalize, /select\(\.draft == true/);
   // It fetches the submitted app from the build run that produced it.
   assert.match(finalize, /gh run download "\$BUILD_RUN_ID"/);
-  // A dev build stays a prerelease: it must never take the "latest" pointer
-  // that unopted clients and the release mirror follow.
-  assert.match(finalize, /gh release edit "\$TAG" --prerelease --latest=false/);
-  assert.doesNotMatch(finalize, /gh release edit "\$TAG" --draft=false --latest\b/);
+  // The artifact carries its own notary-state.json; extracting it over the
+  // marker downloaded from the release would fail the run and, before this
+  // was separated, be misread as an expired artifact.
+  assert.match(finalize, /artifact_dir="\$RUNNER_TEMP\/submitted"/);
+  assert.doesNotMatch(finalize, /gh run download[^\n]*RUNNER_TEMP\/pending/);
+  // Expiry is what the API says, not any download failure.
+  assert.match(finalize, /actions\/runs\/\$BUILD_RUN_ID\/artifacts/);
+  // macOS appends to a published release: it must never restage or re-upload
+  // the Windows assets, and must not re-assert the release pointer.
+  assert.match(finalize, /scripts\/macos-release\.mjs prepare/);
+  assert.match(finalize, /scripts\/macos-release\.mjs verify/);
+  assert.doesNotMatch(finalize, /assets\.mjs (?:prepare|provenance|verify)/);
+  assert.doesNotMatch(finalize, /gh release edit[^\n]*--latest/);
+  assert.doesNotMatch(finalize, /gh release edit[^\n]*--prerelease/);
+  // Every gh release call names the repository, like the build workflow's do.
+  assert.deepEqual(
+    finalize
+      .split("\n")
+      .filter((line) => line.includes("gh release ") && !line.trim().startsWith("#"))
+      .filter((line) => !line.includes("--repo")),
+    [],
+  );
+  // A newer release still waiting on Apple must not starve an older answered one.
+  assert.match(finalize, /for tag in \$candidates; do/);
+  // The release pointer belongs to whoever published the release. macOS only
+  // appends assets and rewrites the notes; re-asserting --latest here would
+  // hand it to whichever release finishes notarization last, which is not the
+  // newest one. (The mirror keys off the prerelease flag and the version, so
+  // it is unaffected either way — the pointer this protects is the one humans
+  // and the GitHub API see.)
+  assert.match(finalize, /gh release edit "\$TAG" --repo "\$GITHUB_REPOSITORY" --notes-file/);
   // The poller runs on a schedule, so every terminal outcome must remove the
   // marker. A marker left on a release that can never be finished becomes a
   // failing run every 30 minutes, forever.

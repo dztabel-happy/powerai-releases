@@ -59,13 +59,16 @@ jobs:
           set -euo pipefail
           if [ -n "$REQUESTED_VERSION" ]; then
             [[ "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
-            tag="v$REQUESTED_VERSION"
+            candidates="v$REQUESTED_VERSION"
           else
-            # Windows now publishes immediately, so the pending release is a
-            # PUBLISHED one carrying the notary-state.json marker.
-            tag="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select([.assets[].name] | index("notary-state.json")) | .tag_name' | sed -n '1p')"
+            # Windows now publishes immediately, so a pending release is a
+            # PUBLISHED one carrying the notary-state.json marker. Consider
+            # every one of them: a newer release sitting In Progress must not
+            # starve an older one Apple already answered, or that older app
+            # ages out of its 14-day artifact retention while first in line.
+            candidates="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select([.assets[].name] | index("notary-state.json")) | .tag_name')"
           fi
-          if [ -z "$tag" ]; then
+          if [ -z "$candidates" ]; then
             echo 'found=false' >> "$GITHUB_OUTPUT"
             exit 0
           fi
@@ -77,7 +80,9 @@ jobs:
             asset_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$tag\") | .assets[] | select(.name == \"notary-state.json\") | .id")"
             if [ -n "$asset_id" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"; fi
           }
-          gh release download "$tag" --pattern notary-state.json --dir "$RUNNER_TEMP/pending"
+          for tag in $candidates; do
+          rm -f "$RUNNER_TEMP/pending/notary-state.json"
+          gh release download "$tag" --repo "$GITHUB_REPOSITORY" --pattern notary-state.json --dir "$RUNNER_TEMP/pending"
           node scripts/release-state.mjs verify "$RUNNER_TEMP/pending/notary-state.json"
           version="$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" version)"
           test "$tag" = "v$version"
@@ -89,8 +94,9 @@ jobs:
             --output-format json > "$RUNNER_TEMP/pending/notary-info.json"
           status="$(node -e "const value=require(process.argv[1]); process.stdout.write(value.status)" "$RUNNER_TEMP/pending/notary-info.json")"
           if [ "$status" = 'In Progress' ]; then
-            echo 'found=false' >> "$GITHUB_OUTPUT"
-            exit 0
+            # Still waiting on Apple. Look at the next pending release rather
+            # than giving up on the whole poll.
+            continue
           fi
           if [ "$status" = 'Invalid' ]; then
             xcrun notarytool log "$submission_id" \
@@ -98,8 +104,8 @@ jobs:
               --key-id "$APPLE_API_KEY_ID" \
               --issuer "$APPLE_API_KEY_ISSUER" \
               "$RUNNER_TEMP/pending/notary-log.json"
-            gh release upload "$tag" "$RUNNER_TEMP/pending/notary-log.json" --clobber
-            gh release edit "$tag" --title "PowerAI $tag (notarization failed)"
+            gh release upload "$tag" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/pending/notary-log.json" --clobber
+            gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --title "PowerAI $tag (notarization failed)"
             drop_marker
             exit 1
           fi
@@ -112,6 +118,10 @@ jobs:
           build_url="$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" buildUrl)"
           echo "build_url=$build_url" >> "$GITHUB_OUTPUT"
           echo "build_run_id=${build_url##*/}" >> "$GITHUB_OUTPUT"
+          exit 0
+          done
+          # Every pending release is still waiting on Apple.
+          echo 'found=false' >> "$GITHUB_OUTPUT"
 
       - name: Checkout exact desktop source
         if: steps.pending.outputs.found == 'true'
@@ -141,16 +151,26 @@ jobs:
           TAG: ${{ steps.pending.outputs.tag }}
         run: |
           set -euo pipefail
-          if ! gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name macos-pending --dir "$RUNNER_TEMP/pending" \
-            || [ ! -f "$RUNNER_TEMP/pending/PowerAI-app-pending.zip" ]; then
-            # The signed app is kept for 14 days. If Apple answered later than
-            # that, this release can never be completed — say so once and drop
-            # the marker rather than failing on every poll from now on.
-            gh release edit "$TAG" --title "PowerAI $TAG (macOS artifact expired)"
+          # A separate directory: this artifact also carries a notary-state.json,
+          # and gh refuses to overwrite the marker already downloaded above.
+          artifact_dir="$RUNNER_TEMP/submitted"
+          mkdir -p "$artifact_dir"
+          # Expiry is a fact the API states; a download can fail for many other
+          # reasons, and treating those as expiry would abandon a release Apple
+          # actually accepted.
+          expired="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$BUILD_RUN_ID/artifacts" \
+            --jq '[.artifacts[] | select(.name == "macos-pending")] | if length == 0 then "gone" else (.[0].expired | tostring) end')"
+          if [ "$expired" != 'false' ]; then
+            # The signed app is kept for 14 days. Past that this release can
+            # never be completed — say so once and drop the marker rather than
+            # failing on every poll from now on.
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --title "PowerAI $TAG (macOS artifact expired)"
             asset_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .assets[] | select(.name == \"notary-state.json\") | .id")"
             if [ -n "$asset_id" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"; fi
             exit 1
           fi
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name macos-pending --dir "$artifact_dir"
+          test -f "$artifact_dir/PowerAI-app-pending.zip"
 
       - name: Staple app and rebuild macOS update assets
         if: steps.pending.outputs.found == 'true'
@@ -159,7 +179,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/final-app" "$RUNNER_TEMP/final-mac"
-          ditto -x -k "$RUNNER_TEMP/pending/PowerAI-app-pending.zip" "$RUNNER_TEMP/final-app"
+          ditto -x -k "$RUNNER_TEMP/submitted/PowerAI-app-pending.zip" "$RUNNER_TEMP/final-app"
           app="$RUNNER_TEMP/final-app/PowerAI.app"
           codesign --verify --deep --strict --verbose=2 "$app"
           xcrun stapler staple "$app"
@@ -179,35 +199,17 @@ jobs:
           spctl --assess --type open --context context:primary-signature --verbose=4 \
             "$RUNNER_TEMP/final-mac/PowerAI-$VERSION-mac-arm64.dmg"
 
-      - name: Download staged Windows assets
-        if: steps.pending.outputs.found == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.pending.outputs.tag }}
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/build-artifacts/windows-x64" "$RUNNER_TEMP/build-artifacts/macos-arm64"
-          gh release download "$TAG" --pattern 'PowerAI-*-win-x64.exe*' --dir "$RUNNER_TEMP/build-artifacts/windows-x64"
-          gh release download "$TAG" --pattern latest.yml --dir "$RUNNER_TEMP/build-artifacts/windows-x64"
-          cp "$RUNNER_TEMP/final-mac"/* "$RUNNER_TEMP/build-artifacts/macos-arm64/"
-
-      - name: Validate final release bundle
+      - name: Stage only the macOS assets
         if: steps.pending.outputs.found == 'true'
         env:
           VERSION: ${{ steps.pending.outputs.version }}
-          DESKTOP_REF: ${{ steps.pending.outputs.desktop_ref }}
-          AGENT_REF: ${{ steps.pending.outputs.agent_ref }}
-          BUILD_URL: ${{ steps.pending.outputs.build_url }}
         run: |
           set -euo pipefail
-          node powerai-desktop/scripts/release/assets.mjs prepare "$RUNNER_TEMP/build-artifacts" "$RUNNER_TEMP/release-assets"
-          node powerai-desktop/scripts/release/assets.mjs provenance \
-            "$RUNNER_TEMP/release-assets" \
-            "$VERSION" \
-            "$DESKTOP_REF" \
-            "$AGENT_REF" \
-            "$BUILD_URL"
-          node powerai-desktop/scripts/release/assets.mjs verify "$RUNNER_TEMP/release-assets" "$VERSION"
+          # Staging tooling comes from THIS repo, not from the release's own
+          # desktop commit: the finalizer must behave the same for every
+          # pending release, including ones built before it was written.
+          node scripts/macos-release.mjs prepare "$RUNNER_TEMP/final-mac" "$RUNNER_TEMP/release-assets" "$VERSION"
+          node scripts/macos-release.mjs verify "$RUNNER_TEMP/release-assets" "$VERSION"
 
       - name: Publish only after byte-for-byte verification
         if: steps.pending.outputs.found == 'true'
@@ -217,10 +219,10 @@ jobs:
           VERSION: ${{ steps.pending.outputs.version }}
         run: |
           set -euo pipefail
-          gh release upload "$TAG" "$RUNNER_TEMP/release-assets"/* --clobber
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/release-assets"/* --clobber
           mkdir -p "$RUNNER_TEMP/remote-check"
           while IFS= read -r file; do
-            gh release download "$TAG" --pattern "$(basename "$file")" --dir "$RUNNER_TEMP/remote-check"
+            gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$(basename "$file")" --dir "$RUNNER_TEMP/remote-check"
           done < <(find "$RUNNER_TEMP/release-assets" -maxdepth 1 -type f | sort)
           (cd "$RUNNER_TEMP/release-assets" && shasum -a 256 * | sort -k2) > "$RUNNER_TEMP/local-hashes.txt"
           (cd "$RUNNER_TEMP/remote-check" && shasum -a 256 * | sort -k2) > "$RUNNER_TEMP/remote-hashes.txt"
@@ -229,13 +231,13 @@ jobs:
             asset_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .assets[] | select(.name == \"$name\") | .id")"
             if [ -n "$asset_id" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"; fi
           done
-          # The release is already published by the Windows lane; only the
-          # notes change here. A dev build stays a prerelease and must never
-          # take the "latest" pointer that unopted clients and the mirror follow.
+          # Only the notes change. The Windows lane already set this release's
+          # prerelease flag and latest pointer correctly when it published;
+          # re-asserting either here would hand "latest" to whichever release
+          # happens to finish notarization last, which is not the newest one.
           if [[ "$VERSION" == *-* ]]; then
             printf 'PowerAI %s DEV build (prerelease). Only clients that opted into prerelease updates receive it. macOS arm64 is signed and notarized; the Windows installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
-            gh release edit "$TAG" --prerelease --latest=false --title "PowerAI $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           else
             printf 'PowerAI %s stable release — every client receives it through automatic updates. macOS arm64 is signed and notarized; the Windows installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
-            gh release edit "$TAG" --latest --title "PowerAI $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
           fi
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file "$RUNNER_TEMP/release-notes.md"
