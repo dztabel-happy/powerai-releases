@@ -137,6 +137,14 @@ test("release workflows keep private source and credentials behind manual releas
   // not sign the container — so the dmg carries its own notarization, and the
   // staple that follows must happen before the manifest is measured.
   assert.match(finalize, /notarytool submit "\$RUNNER_TEMP\/final-mac[^\n]*\n[\s\S]{0,400}?--wait/);
+  // A notarization ticket is not a signature: Gatekeeper assesses a downloaded
+  // disk image against its primary signature, so the container is signed
+  // before it is submitted.
+  assert.match(finalize, /codesign --force --timestamp[\s\S]{0,200}mac-arm64\.dmg/);
+  assert.ok(
+    finalize.indexOf("codesign --force --timestamp") <
+      finalize.indexOf('notarytool submit "$RUNNER_TEMP/final-mac'),
+  );
   assert.ok(
     finalize.indexOf('stapler staple "$RUNNER_TEMP/final-mac') < finalize.indexOf("macos-release.mjs prepare"),
   );

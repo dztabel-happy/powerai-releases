@@ -48,6 +48,34 @@ jobs:
           chmod 600 "$key_path"
           echo "APPLE_API_KEY_PATH=$key_path" >> "$GITHUB_ENV"
 
+      - name: Import the signing identity
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          : "${MAC_CSC_LINK:?Missing MAC_CSC_LINK}"
+          : "${MAC_CSC_KEY_PASSWORD:?Missing MAC_CSC_KEY_PASSWORD}"
+          # A notarization ticket is not a signature: Gatekeeper assesses a
+          # downloaded disk image against its primary signature, and
+          # electron-builder does not sign the container. So this job signs the
+          # dmg itself, which means it needs a keychain — it never had one.
+          keychain="$RUNNER_TEMP/signing.keychain-db"
+          password="$(uuidgen)"
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          printf '%s' "$MAC_CSC_LINK" | base64 -D > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$keychain" \
+            -P "$MAC_CSC_KEY_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          identity="$(security find-identity -v -p codesigning "$keychain" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          test -n "$identity"
+          echo "SIGNING_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "SIGNING_KEYCHAIN=$keychain" >> "$GITHUB_ENV"
+
       - name: Find pending release and query Apple
         id: pending
         env:
@@ -209,6 +237,10 @@ jobs:
           # there is nothing to gain by deferring a wait that ends in minutes.
           # A timeout here simply fails the run; the marker survives and the
           # next poll redoes this idempotently.
+          codesign --force --timestamp --options runtime \
+            --sign "$SIGNING_IDENTITY" --keychain "$SIGNING_KEYCHAIN" \
+            "$RUNNER_TEMP/final-mac/PowerAI-$VERSION-mac-arm64.dmg"
+          codesign --verify --strict --verbose=2 "$RUNNER_TEMP/final-mac/PowerAI-$VERSION-mac-arm64.dmg"
           xcrun notarytool submit "$RUNNER_TEMP/final-mac/PowerAI-$VERSION-mac-arm64.dmg" \
             --key "$APPLE_API_KEY_PATH" \
             --key-id "$APPLE_API_KEY_ID" \
