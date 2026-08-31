@@ -176,6 +176,11 @@ jobs:
         if: steps.pending.outputs.found == 'true'
         env:
           VERSION: ${{ steps.pending.outputs.version }}
+          # The disk image gets its own notarization in this step, so it needs
+          # the same credentials the polling step used. APPLE_API_KEY_PATH
+          # already arrives through GITHUB_ENV; the key id and issuer do not.
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          APPLE_API_KEY_ISSUER: ${{ secrets.APPLE_API_KEY_ISSUER }}
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/final-app" "$RUNNER_TEMP/final-mac"
