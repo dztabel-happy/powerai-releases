@@ -161,12 +161,37 @@ function syncDmg(outputDir, version) {
   if (rewritten !== 2) fail("Expected to refresh both updater manifests");
 }
 
+/**
+ * The release provenance published by the Windows lane lists a sha256 for
+ * every asset, and the mirror refuses to install anything whose digest does
+ * not match. Assets appended later have to join that list, or they arrive
+ * unverified — which is the same as unverifiable.
+ */
+function extendProvenance(provenancePath, assetsDir, version) {
+  if (!versionPattern.test(version)) fail("Version must be exact semver");
+  const provenance = JSON.parse(fs.readFileSync(provenancePath, "utf8"));
+  if (provenance.version !== version) fail(`Provenance is for ${provenance.version}, not ${version}`);
+  for (const file of filesUnder(assetsDir)) {
+    const name = path.basename(file);
+    const digest = crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex");
+    if (provenance.assets[name] && provenance.assets[name] !== digest) {
+      fail(`Provenance already records a different ${name}: macOS must not replace a published asset`);
+    }
+    provenance.assets[name] = digest;
+  }
+  provenance.assets = Object.fromEntries(
+    Object.entries(provenance.assets).sort(([left], [right]) => left.localeCompare(right)),
+  );
+  fs.writeFileSync(provenancePath, `${JSON.stringify(provenance, null, 2)}\n`);
+}
+
 const [command, ...args] = process.argv.slice(2);
 try {
   if (command === "prepare" && args.length === 3) prepare(args[0], args[1], args[2]);
   else if (command === "sync-dmg" && args.length === 2) syncDmg(args[0], args[1]);
+  else if (command === "extend-provenance" && args.length === 3) extendProvenance(args[0], args[1], args[2]);
   else if (command === "verify" && args.length === 2) verify(args[0], args[1]);
-  else fail("Usage: macos-release.mjs prepare <build-dir> <output> <version> | sync-dmg <output> <version> | verify <output> <version>");
+  else fail("Usage: macos-release.mjs prepare <build-dir> <output> <version> | sync-dmg <output> <version> | extend-provenance <provenance> <assets> <version> | verify <output> <version>");
 } catch (error) {
   console.error(error.message);
   process.exit(1);

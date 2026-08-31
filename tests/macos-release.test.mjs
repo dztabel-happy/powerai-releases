@@ -162,3 +162,50 @@ test("syncing a manifest that never described the disk image is an error", () =>
   );
   assert.match(expectFailure("sync-dmg", output, version), /no PowerAI.*\.dmg entry to refresh/);
 });
+
+test("appended assets join the provenance the mirror verifies against", () => {
+  const { build, output } = buildDir();
+  run("prepare", build, output, version);
+  const provenance = path.join(output, "..", "release-provenance.json");
+  fs.writeFileSync(
+    provenance,
+    JSON.stringify({
+      version,
+      desktopCommit: "a".repeat(40),
+      agentCommit: "b".repeat(40),
+      workflowRun: "https://example.test/run/1",
+      assets: { [`PowerAI-${version}-win-x64.exe`]: "c".repeat(64) },
+    }),
+  );
+
+  run("extend-provenance", provenance, output, version);
+  const updated = JSON.parse(fs.readFileSync(provenance, "utf8"));
+  // The Windows entry the other lane recorded stays exactly as it was.
+  assert.equal(updated.assets[`PowerAI-${version}-win-x64.exe`], "c".repeat(64));
+  for (const name of fs.readdirSync(output)) {
+    assert.match(updated.assets[name], /^[0-9a-f]{64}$/);
+  }
+});
+
+test("provenance for a different version is refused", () => {
+  const { build, output } = buildDir();
+  run("prepare", build, output, version);
+  const provenance = path.join(output, "..", "release-provenance.json");
+  fs.writeFileSync(provenance, JSON.stringify({ version: "9.9.9", assets: {} }));
+  assert.match(expectFailure("extend-provenance", provenance, output, version), /is for 9\.9\.9/);
+});
+
+test("macOS may not overwrite an asset the other lane already published", () => {
+  const { build, output } = buildDir();
+  run("prepare", build, output, version);
+  const provenance = path.join(output, "..", "release-provenance.json");
+  const dmg = `PowerAI-${version}-mac-arm64.dmg`;
+  fs.writeFileSync(
+    provenance,
+    JSON.stringify({ version, assets: { [dmg]: "d".repeat(64) } }),
+  );
+  assert.match(
+    expectFailure("extend-provenance", provenance, output, version),
+    /must not replace a published asset/,
+  );
+});
