@@ -18,9 +18,15 @@
 
 ## 3. 必需制品
 
-当前发布通道仅提供 Windows x64 内测版。Windows 安装包暂不签名，Release 说明必须明确标注；macOS 构建、公证和发布均暂停，不进入当前流水线。
+当前发布通道提供 Windows x64 与 macOS arm64。Windows 安装包暂不签名，Release 说明必须明确标注；macOS 用 Developer ID 签名并经 Apple 公证。
 
-### macOS（暂停）
+两条产线**互不阻塞**：Windows 构建完立即发布；macOS 提交 Apple 后不等待，由
+`finalize-notarization` 轮询，公证通过后把 macOS 制品追加到同一个 Release。
+Apple 排队时间不可预测，让发布等它是 2026-08 之前 macOS 停滞的直接原因。
+
+macOS 仅提供 arm64（Apple Silicon）。Intel 机型不在当前发布范围内。
+
+### macOS arm64
 
 - `PowerAI-X.Y.Z-mac-arm64.dmg`
 - `PowerAI-X.Y.Z-mac-arm64.zip`
@@ -68,9 +74,13 @@
 
 上述验收用于确认真实机器上的 Windows Installer、网络、LibreOffice、原生窗控和用户数据行为，不阻塞内测安装包发布。发现问题时停止该版本分发，并以更高版本修复。
 
-macOS 恢复发布前，必须重新启用 Developer ID 签名、公证、Gatekeeper 和完整旧版到新版升级验收，不得复用 Windows-only 发布结论。
+macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep --strict`
+且 Authority 为 Developer ID Application）、Apple 公证通过并 staple、
+`spctl --assess` 放行。这三项由 `finalize-notarization` 强制执行，任何一项不过
+就不追加 macOS 制品。
 
-macOS 暂停期间只允许在开发者 Mac 上本地构建和测试，不生成公开制品，也不进入公开 CI。
+macOS 自动更新（旧版→新版）尚未在公开流水线上验收过。首个 macOS dev 版发布后
+必须补做，未完成前不得据此宣布 macOS 升级链路可用。
 
 ## 7. 回滚
 

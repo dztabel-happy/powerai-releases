@@ -7,9 +7,14 @@ on:
         description: Optional exact pending version
         required: false
         type: string
+  schedule:
+    # Apple's queue is unbounded; polling is how the macOS lane rejoins a
+    # release that already shipped Windows.
+    - cron: "17,47 * * * *"
 
 permissions:
   contents: write
+  actions: read
 
 concurrency:
   group: powerai-notarization-finalizer
@@ -56,7 +61,9 @@ jobs:
             [[ "$REQUESTED_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
             tag="v$REQUESTED_VERSION"
           else
-            tag="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select(.draft == true and (.name | endswith("(pending notarization)"))) | .tag_name' | sed -n '1p')"
+            # Windows now publishes immediately, so the pending release is a
+            # PUBLISHED one carrying the notary-state.json marker.
+            tag="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq '.[] | select([.assets[].name] | index("notary-state.json")) | .tag_name' | sed -n '1p')"
           fi
           if [ -z "$tag" ]; then
             echo 'found=false' >> "$GITHUB_OUTPUT"
@@ -64,7 +71,6 @@ jobs:
           fi
           mkdir -p "$RUNNER_TEMP/pending"
           gh release download "$tag" --pattern notary-state.json --dir "$RUNNER_TEMP/pending"
-          gh release download "$tag" --pattern PowerAI-app-pending.zip --dir "$RUNNER_TEMP/pending"
           node scripts/release-state.mjs verify "$RUNNER_TEMP/pending/notary-state.json"
           version="$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" version)"
           test "$tag" = "v$version"
@@ -95,7 +101,9 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "desktop_ref=$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" desktopCommit)" >> "$GITHUB_OUTPUT"
           echo "agent_ref=$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" agentCommit)" >> "$GITHUB_OUTPUT"
-          echo "build_url=$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" buildUrl)" >> "$GITHUB_OUTPUT"
+          build_url="$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" buildUrl)"
+          echo "build_url=$build_url" >> "$GITHUB_OUTPUT"
+          echo "build_run_id=${build_url##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Checkout exact desktop source
         if: steps.pending.outputs.found == 'true'
@@ -116,6 +124,16 @@ jobs:
       - name: Install packaging dependencies
         if: steps.pending.outputs.found == 'true'
         run: bun install --cwd powerai-desktop --frozen-lockfile
+
+      - name: Download the submitted app from its build run
+        if: steps.pending.outputs.found == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUILD_RUN_ID: ${{ steps.pending.outputs.build_run_id }}
+        run: |
+          set -euo pipefail
+          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name macos-pending --dir "$RUNNER_TEMP/pending"
+          test -f "$RUNNER_TEMP/pending/PowerAI-app-pending.zip"
 
       - name: Staple app and rebuild macOS update assets
         if: steps.pending.outputs.found == 'true'
@@ -194,5 +212,13 @@ jobs:
             asset_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .assets[] | select(.name == \"$name\") | .id")"
             if [ -n "$asset_id" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"; fi
           done
-          printf 'PowerAI %s internal test build. macOS is signed and notarized; Windows is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
-          gh release edit "$TAG" --draft=false --latest --title "PowerAI $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          # The release is already published by the Windows lane; only the
+          # notes change here. A dev build stays a prerelease and must never
+          # take the "latest" pointer that unopted clients and the mirror follow.
+          if [[ "$VERSION" == *-* ]]; then
+            printf 'PowerAI %s DEV build (prerelease). Only clients that opted into prerelease updates receive it. macOS arm64 is signed and notarized; the Windows installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+            gh release edit "$TAG" --prerelease --latest=false --title "PowerAI $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          else
+            printf 'PowerAI %s stable release — every client receives it through automatic updates. macOS arm64 is signed and notarized; the Windows installer is unsigned.\n' "$VERSION" > "$RUNNER_TEMP/release-notes.md"
+            gh release edit "$TAG" --latest --title "PowerAI $TAG" --notes-file "$RUNNER_TEMP/release-notes.md"
+          fi

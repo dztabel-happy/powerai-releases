@@ -56,8 +56,25 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /retention-days: 1/);
   assert.match(build, /PowerAI-\$\{\{ needs\.guard\.outputs\.version \}\}-win-x64\.zip/);
   assert.match(build, /tests\/manual\/spreadsheet-preview-budget\/verify\.ts/);
-  assert.match(build, /spreadsheet-preview-budget-windows\.json/);
-  assert.doesNotMatch(build, /retention-days: (?:[2-9]|[1-9][0-9]+)/);
+  assert.match(build, /spreadsheet-preview-budget-windows/);
+  // Build intermediates stay short-lived: only diagnosis evidence (3 days)
+  // and the signed macOS app awaiting notarization (14 days) outlive their
+  // run. The macOS exception is load-bearing — Apple's queue is unbounded,
+  // and the finalizer fetches that artifact once the answer arrives.
+  const retentions = build
+    .split("\n")
+    .map((line, index) => [line, index])
+    .filter(([line]) => /retention-days: (?:[2-9]|[1-9][0-9]+)/.test(line))
+    .map(([line, index]) => [
+      line.trim(),
+      build.split("\n").slice(Math.max(0, index - 6), index + 1).join("\n"),
+    ]);
+  assert.deepEqual(
+    retentions.map(([line]) => line),
+    ["retention-days: 3", "retention-days: 14"],
+  );
+  assert.match(retentions[0][1], /name: spreadsheet-preview-budget-windows/);
+  assert.match(retentions[1][1], /name: macos-pending/);
   assert.match(
     build,
     /gh release create "\$tag" --repo "\$GITHUB_REPOSITORY" --draft/,
@@ -78,12 +95,34 @@ test("release workflows keep private source and credentials behind manual releas
       .filter((line) => !line.includes("--repo")),
     [],
   );
-  assert.doesNotMatch(build, /macos-arm64:|notarytool|APPLE_|MAC_CSC/);
-  assert.doesNotMatch(finalize, /schedule:/);
+
+  // The macOS lane must never gate the Windows publish: Apple's queue is
+  // unbounded, and gating on it is what stalled macOS releases before.
+  assert.match(build, /^  macos-arm64:$/m);
+  assert.match(build, /needs: \[guard, approve\]/);
+  assert.doesNotMatch(build, /needs: \[guard, macos-arm64, windows-x64\]/);
+  assert.match(build, /POWERAI_NOTARIZATION_MODE: deferred/);
+  assert.match(build, /xcrun notarytool submit/);
+  assert.doesNotMatch(build, /notarytool submit[\s\S]{0,400}--wait/);
+  // The published release carries the marker the finalizer looks for.
+  assert.match(build, /pending\/notary-state\.json --clobber/);
+  // The finalizer polls on a schedule because nothing else can tell us when
+  // Apple answered; the release it completes is already published.
+  assert.match(finalize, /schedule:/);
   assert.match(finalize, /workflow_dispatch:/);
   assert.match(finalize, /notarytool info/);
   assert.match(finalize, /--prepackaged/);
-  assert.match(finalize, /gh release edit "\$TAG" --draft=false --latest/);
+  assert.match(finalize, /xcrun stapler staple/);
+  assert.match(finalize, /spctl --assess/);
+  // It finds work by the marker asset, not by a draft release.
+  assert.match(finalize, /index\("notary-state\.json"\)/);
+  assert.doesNotMatch(finalize, /select\(\.draft == true/);
+  // It fetches the submitted app from the build run that produced it.
+  assert.match(finalize, /gh run download "\$BUILD_RUN_ID"/);
+  // A dev build stays a prerelease: it must never take the "latest" pointer
+  // that unopted clients and the release mirror follow.
+  assert.match(finalize, /gh release edit "\$TAG" --prerelease --latest=false/);
+  assert.doesNotMatch(finalize, /gh release edit "\$TAG" --draft=false --latest\b/);
   assert.doesNotMatch(`${build}\n${finalize}`, /uses: [^\n]+@v[0-9]/);
 });
 
