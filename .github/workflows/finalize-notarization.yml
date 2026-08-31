@@ -70,6 +70,13 @@ jobs:
             exit 0
           fi
           mkdir -p "$RUNNER_TEMP/pending"
+          # Every terminal outcome must drop the marker. The poller runs on a
+          # schedule, so a marker left behind on a release it can never
+          # finish turns into a failure every 30 minutes, forever.
+          drop_marker() {
+            asset_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$tag\") | .assets[] | select(.name == \"notary-state.json\") | .id")"
+            if [ -n "$asset_id" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"; fi
+          }
           gh release download "$tag" --pattern notary-state.json --dir "$RUNNER_TEMP/pending"
           node scripts/release-state.mjs verify "$RUNNER_TEMP/pending/notary-state.json"
           version="$(node scripts/release-state.mjs get "$RUNNER_TEMP/pending/notary-state.json" version)"
@@ -93,6 +100,7 @@ jobs:
               "$RUNNER_TEMP/pending/notary-log.json"
             gh release upload "$tag" "$RUNNER_TEMP/pending/notary-log.json" --clobber
             gh release edit "$tag" --title "PowerAI $tag (notarization failed)"
+            drop_marker
             exit 1
           fi
           test "$status" = 'Accepted'
@@ -130,10 +138,19 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           BUILD_RUN_ID: ${{ steps.pending.outputs.build_run_id }}
+          TAG: ${{ steps.pending.outputs.tag }}
         run: |
           set -euo pipefail
-          gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name macos-pending --dir "$RUNNER_TEMP/pending"
-          test -f "$RUNNER_TEMP/pending/PowerAI-app-pending.zip"
+          if ! gh run download "$BUILD_RUN_ID" --repo "$GITHUB_REPOSITORY" --name macos-pending --dir "$RUNNER_TEMP/pending" \
+            || [ ! -f "$RUNNER_TEMP/pending/PowerAI-app-pending.zip" ]; then
+            # The signed app is kept for 14 days. If Apple answered later than
+            # that, this release can never be completed — say so once and drop
+            # the marker rather than failing on every poll from now on.
+            gh release edit "$TAG" --title "PowerAI $TAG (macOS artifact expired)"
+            asset_id="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases" --jq ".[] | select(.tag_name == \"$TAG\") | .assets[] | select(.name == \"notary-state.json\") | .id")"
+            if [ -n "$asset_id" ]; then gh api -X DELETE "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id"; fi
+            exit 1
+          fi
 
       - name: Staple app and rebuild macOS update assets
         if: steps.pending.outputs.found == 'true'

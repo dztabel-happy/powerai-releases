@@ -123,6 +123,11 @@ test("release workflows keep private source and credentials behind manual releas
   // that unopted clients and the release mirror follow.
   assert.match(finalize, /gh release edit "\$TAG" --prerelease --latest=false/);
   assert.doesNotMatch(finalize, /gh release edit "\$TAG" --draft=false --latest\b/);
+  // The poller runs on a schedule, so every terminal outcome must remove the
+  // marker. A marker left on a release that can never be finished becomes a
+  // failing run every 30 minutes, forever.
+  assert.match(finalize, /drop_marker\n\s+exit 1/);
+  assert.match(finalize, /macOS artifact expired/);
   assert.doesNotMatch(`${build}\n${finalize}`, /uses: [^\n]+@v[0-9]/);
 });
 
