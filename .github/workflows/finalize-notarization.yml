@@ -286,7 +286,18 @@ jobs:
           VERSION: ${{ steps.pending.outputs.version }}
         run: |
           set -euo pipefail
+          # The mirror verifies every asset against release-provenance.json and
+          # refuses anything whose digest does not match. Assets appended after
+          # the Windows lane wrote that file have to join it, or they arrive
+          # unverified. This is the one published file macOS may rewrite: it is
+          # metadata describing the release, not a download anyone holds.
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern release-provenance.json --dir "$RUNNER_TEMP/provenance"
+          node scripts/macos-release.mjs extend-provenance \
+            "$RUNNER_TEMP/provenance/release-provenance.json" \
+            "$RUNNER_TEMP/release-assets" \
+            "$VERSION"
           gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/release-assets"/* --clobber
+          gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$RUNNER_TEMP/provenance/release-provenance.json" --clobber
           mkdir -p "$RUNNER_TEMP/remote-check"
           while IFS= read -r file; do
             gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern "$(basename "$file")" --dir "$RUNNER_TEMP/remote-check"
