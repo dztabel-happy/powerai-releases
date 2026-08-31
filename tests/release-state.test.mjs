@@ -169,6 +169,45 @@ test("release workflows keep private source and credentials behind manual releas
   assert.doesNotMatch(`${build}\n${finalize}`, /uses: [^\n]+@v[0-9]/);
 });
 
+test("every workflow step declares the variables its script actually reads", () => {
+  // `set -u` turns a missing env var into a failure at the exact line that
+  // needs it — after minutes of work, as a real release run showed. The
+  // mapping between a step's script and its env block is easy to break when a
+  // command moves between steps, so it is checked here rather than in a run.
+  const ambient = new Set([
+    "VERSION", "TAG", "GH_TOKEN", "GITHUB_REPOSITORY", "GITHUB_SERVER_URL", "GITHUB_RUN_ID",
+    "GITHUB_REF_NAME", "GITHUB_ENV", "GITHUB_OUTPUT", "RUNNER_TEMP", "HOME", "PATH", "BUN_VERSION",
+  ]);
+  for (const file of ["build-release.yml", "finalize-notarization.yml"]) {
+    const text = fs.readFileSync(path.join(root, ".github/workflows", file), "utf8");
+    // Split on step boundaries: a step starts at "      - name:" and its env
+    // block and run script belong to it until the next one.
+    const steps = text.split(/\n(?=      - (?:name|uses|run):)/);
+    const exported = new Set();
+    for (const step of steps) {
+      for (const match of step.matchAll(/echo "([A-Z][A-Z0-9_]+)=[^"]*" >> "\$GITHUB_ENV"/g)) {
+        exported.add(match[1]);
+      }
+      const envBlock = step.match(/\n        env:\n((?:\s{10}\S[^\n]*\n)+)/);
+      const declared = new Set(
+        (envBlock ? envBlock[1] : "")
+          .split("\n")
+          .map((line) => line.match(/^\s+([A-Za-z_][A-Za-z0-9_]*):/))
+          .filter(Boolean)
+          .map((match) => match[1]),
+      );
+      const runBlock = step.slice(step.indexOf("\n        run:"));
+      if (!runBlock) continue;
+      for (const match of runBlock.matchAll(/"\$([A-Z][A-Z0-9_]{2,})"/g)) {
+        const name = match[1];
+        if (ambient.has(name) || declared.has(name) || exported.has(name)) continue;
+        const stepName = (step.match(/- name: (.+)/) ?? [, "(unnamed)"])[1];
+        assert.fail(`${file} step "${stepName}" reads $${name} but no env block declares it`);
+      }
+    }
+  }
+});
+
 test("Windows release assets are exact, self-consistent, and tamper evident", () => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "powerai-windows-release-"));
   const artifacts = path.join(directory, "artifacts", "windows-x64");
