@@ -103,9 +103,20 @@ macOS 自动更新（旧版→新版）已于 2026-08-31 在 `v0.1.38-dev.1` 上
 `0.1.38-dev.1`、下载 337MB zip 并通过 sha512 校验，界面给出"重启更新"。落盘
 文件的 sha512 与 Release 中的制品逐字节一致。
 
-后续每个引入 macOS 制品的版本沿用同一路径复核：装订后的 dmg 与 zip 内 .app 都
-必须 `spctl --assess` 放行，且 `latest-mac.yml` 声明的 sha512 必须等于 Release
-上实际制品的 sha512——dmg 在 staple 后字节会变，只有 `sync-dmg` 刷新过才成立。
+后续每个引入 macOS 制品的版本按成本分级复核（2026-09-01 起，v0.1.38-dev.2
+实测后修订——那次按旧要求下了 700MB 制品本地验签，四项全过但全是重复劳动）：
+
+- **dev 版（默认）**：只做免费的**尺寸核对**——GitHub API 的 asset size 必须
+  等于 `latest-mac.yml` / `latest-arm64-mac.yml` 声明的 size，dmg 与 zip 都核。
+  这一条足以抓住本节唯一的残余失效模式：dmg 在 staple 后字节会变（尺寸必变），
+  只有 `sync-dmg` 刷新过、声明与实物才对得上。签名/公证/装订/`spctl` 四项由
+  `finalize-notarization` 在 CI 里强制（任何一项不过就不追加制品），
+  本地重跑不新增保障。
+- **正式版、或任一尺寸对不上时**：完整下载制品，本地复核四件套
+  （`codesign --verify --deep --strict`、Authority 为 Developer ID、
+  `spctl --assess` 放行、zip sha512 与清单逐字节一致），并核对
+  `CodeResources` 开头的 `s8ch` 装订魔数（`stapler validate` 恒联网查询，
+  不能当离线证据）。
 
 ## 7. 回滚
 
