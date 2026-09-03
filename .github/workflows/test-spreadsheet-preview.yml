@@ -12,6 +12,15 @@ name: Test Spreadsheet Preview
 # page fast, an image-heavy small table must stay interactive, and a workbook
 # with a link into another workbook must open with the external-reference
 # notice and no engine errors persisted by an edit.
+#
+# A second lane drives the same binary through what a person does in the
+# preview (tests/manual/spreadsheet-preview-fidelity in powerai-desktop):
+# opening, looking around, no-op saves, undo/redo, typing, bold, paste,
+# clearing, an agent write into the open workbook, a file changed underneath
+# by another program, a sheet rename and a row insertion on a workbook with
+# external links and pictures, and closing the tab with unsaved edits — each
+# with the outcome it must produce: a patch, a cancellable warning, or an
+# honest refusal.
 
 on:
   workflow_dispatch:
@@ -75,6 +84,14 @@ jobs:
           $evidenceDir = Join-Path $env:RUNNER_TEMP 'spreadsheet-preview-acceptance'
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           bun tests/manual/spreadsheet-preview-budget/verify.ts "--executable=$env:POWERAI_EXE" "--evidence=$(Join-Path $evidenceDir 'evidence.json')"
+
+      - name: Run the preview fidelity acceptance against the shipped binary
+        shell: pwsh
+        working-directory: powerai-desktop
+        run: |
+          $evidenceDir = Join-Path $env:RUNNER_TEMP 'spreadsheet-preview-acceptance'
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          bunx tsx tests/manual/spreadsheet-preview-fidelity/drive.ts "--executable=$env:POWERAI_EXE" "--evidence=$(Join-Path $evidenceDir 'fidelity.json')" "--out=$(Join-Path $evidenceDir 'fidelity-shots')"
 
       - name: Retain acceptance evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
