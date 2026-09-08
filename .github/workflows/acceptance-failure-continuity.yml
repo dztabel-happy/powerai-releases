@@ -1,0 +1,176 @@
+name: Acceptance - packaged Windows failure continuity
+
+# Builds the unsigned Windows package for exact desktop/agent commits and runs the
+# packaged failure continuity matrix against the real gateway. Nothing is
+# published: this is how driver or product changes are validated on Windows
+# without creating a dev release. Unlike the advisory lane in the release
+# build, a failing matrix fails this workflow.
+
+on:
+  workflow_dispatch:
+    inputs:
+      desktop_ref:
+        description: Exact 40-character desktop commit (any branch)
+        required: true
+        type: string
+      agent_ref:
+        description: Exact 40-character agent commit (any branch)
+        required: true
+        type: string
+      cases:
+        description: Comma-separated case ids (empty = full matrix)
+        required: false
+        default: ""
+        type: string
+      workers:
+        description: Parallel cases (1 or 2)
+        required: false
+        default: "2"
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: acceptance-failure-continuity-${{ inputs.desktop_ref }}-${{ inputs.agent_ref }}
+  cancel-in-progress: false
+
+env:
+  BUN_VERSION: 1.3.13
+
+jobs:
+  windows-x64:
+    name: Build and verify Windows x64
+    runs-on: windows-2025
+    environment: release
+    timeout-minutes: 150
+    steps:
+      - name: Validate inputs
+        shell: bash
+        env:
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+          WORKERS: ${{ inputs.workers }}
+        run: |
+          set -euo pipefail
+          [[ "$DESKTOP_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$AGENT_REF" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$WORKERS" =~ ^[12]$ ]]
+
+      - name: Checkout exact desktop source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: dztabel-happy/powerai-desktop
+          ref: ${{ inputs.desktop_ref }}
+          ssh-key: ${{ secrets.POWERAI_DESKTOP_DEPLOY_KEY }}
+          path: powerai-desktop
+          fetch-depth: 1
+
+      - name: Checkout exact agent source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: dztabel-happy/powerai-agent
+          ref: ${{ inputs.agent_ref }}
+          ssh-key: ${{ secrets.POWERAI_AGENT_DEPLOY_KEY }}
+          path: powerai-agent
+          fetch-depth: 1
+
+      - name: Validate exact commits
+        shell: bash
+        env:
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+        run: |
+          set -euo pipefail
+          test "$(git -C powerai-desktop rev-parse HEAD)" = "$DESKTOP_REF"
+          test "$(git -C powerai-agent rev-parse HEAD)" = "$AGENT_REF"
+          test -f powerai-desktop/tests/manual/failure-continuity/matrix.ts
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+
+      - name: Build native agent
+        shell: bash
+        run: |
+          bun install --cwd powerai-agent --filter './packages/opencode' --filter './packages/app' --frozen-lockfile
+          bun run --cwd powerai-agent/packages/opencode build -- --single --skip-install
+
+      - name: Install desktop dependencies
+        shell: bash
+        run: bun install --cwd powerai-desktop --frozen-lockfile
+
+      - name: Prepare checksum-verified Electron distribution
+        shell: bash
+        run: |
+          electron_dist="$(cd powerai-desktop && node scripts/release/prepare-electron.mjs win32 x64 "$RUNNER_TEMP/electron")"
+          echo "ELECTRON_DIST_PATH=$electron_dist" >> "$GITHUB_ENV"
+
+      - name: Build unsigned Windows package
+        working-directory: powerai-desktop
+        env:
+          CI: "true"
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: bun run build-win:x64
+
+      - name: Verify Windows package
+        shell: pwsh
+        working-directory: powerai-desktop
+        run: node scripts/release/verify-native-module.mjs --app out/win-unpacked/PowerAI.exe
+
+      - name: Require real gateway credentials
+        shell: pwsh
+        env:
+          POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:POWERAI_SMOKE_API_KEY)) {
+            throw 'POWERAI_SMOKE_API_KEY is missing; packaged failure continuity acceptance cannot run.'
+          }
+
+      - name: Set up Node for the failure continuity driver
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Verify packaged failure continuity
+        timeout-minutes: 75
+        shell: pwsh
+        working-directory: powerai-desktop
+        env:
+          POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
+          POWERAI_P0_ENGINE_CACHE: ${{ runner.temp }}\powerai-p0-engine
+          CASES: ${{ inputs.cases }}
+          WORKERS: ${{ inputs.workers }}
+        run: |
+          $executable = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
+          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          $arguments = @('--import', 'tsx', 'tests/manual/failure-continuity/matrix.ts', "--app=$executable", "--evidence=$evidence", "--workers=$env:WORKERS")
+          if (-not [string]::IsNullOrWhiteSpace($env:CASES)) { $arguments += "--cases=$env:CASES" }
+          node @arguments
+          if ($LASTEXITCODE -ne 0) {
+            "Failure continuity: FAILED - see the failure-continuity-windows artifact, matrix.json lists every case." >> $env:GITHUB_STEP_SUMMARY
+            exit $LASTEXITCODE
+          }
+          'Failure continuity: PASSED - packaged Windows matrix green.' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Release failure continuity evidence locks
+        if: always()
+        shell: pwsh
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match [regex]::Escape($evidence) } | ForEach-Object {
+            Write-Host "Stopping leftover process $($_.ProcessId): $($_.Name)"
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+
+      - name: Retain failure continuity evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        continue-on-error: true
+        with:
+          name: failure-continuity-windows
+          if-no-files-found: warn
+          retention-days: 3
+          path: ${{ runner.temp }}/failure-continuity-windows/
