@@ -170,6 +170,52 @@ jobs:
           retention-days: 3
           path: ${{ runner.temp }}/spreadsheet-preview-budget-windows/
 
+      - name: Check real model image credentials
+        id: image_credentials
+        shell: pwsh
+        env:
+          POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
+        run: |
+          $evidenceDir = Join-Path $env:RUNNER_TEMP 'image-model-smoke-windows'
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          if ([string]::IsNullOrWhiteSpace($env:POWERAI_SMOKE_API_KEY)) {
+            'available=false' >> $env:GITHUB_OUTPUT
+            $reason = 'POWERAI_SMOKE_API_KEY is missing; real model image acceptance was NOT run.'
+            Write-Host "::warning::SKIPPED: $reason"
+            "Image model smoke: SKIPPED — $reason" >> $env:GITHUB_STEP_SUMMARY
+            @{ status = 'skipped'; passed = $false; reason = $reason } | ConvertTo-Json | Set-Content (Join-Path $evidenceDir 'evidence.json')
+          } else {
+            'available=true' >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Verify packaged real model image turn
+        if: steps.image_credentials.outputs.available == 'true'
+        timeout-minutes: 5
+        shell: pwsh
+        working-directory: powerai-desktop
+        env:
+          POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
+        run: |
+          $agent = (Resolve-Path 'out/win-unpacked/resources/bundled-powerai-agent/win32-x64/powerai-agent.exe').Path
+          $evidence = Join-Path $env:RUNNER_TEMP 'image-model-smoke-windows/evidence.json'
+          bun tests/manual/image-model-smoke/verify.ts "--agent=$agent" "--evidence=$evidence"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          'Image model smoke: PASSED — all four image codes verified.' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Retain real model image evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: image-model-smoke-windows
+          if-no-files-found: warn
+          retention-days: 3
+          path: |
+            ${{ runner.temp }}/image-model-smoke-windows/evidence.json
+            ${{ runner.temp }}/image-model-smoke-windows/config.json
+            ${{ runner.temp }}/image-model-smoke-windows/run-config.json
+            ${{ runner.temp }}/image-model-smoke-windows/events.json
+            ${{ runner.temp }}/image-model-smoke-windows/stderr.log
+
       - name: Retain Windows artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:

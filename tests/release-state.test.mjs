@@ -71,10 +71,11 @@ test("release workflows keep private source and credentials behind manual releas
     ]);
   assert.deepEqual(
     retentions.map(([line]) => line),
-    ["retention-days: 3", "retention-days: 14"],
+    ["retention-days: 3", "retention-days: 3", "retention-days: 14"],
   );
   assert.match(retentions[0][1], /name: spreadsheet-preview-budget-windows/);
-  assert.match(retentions[1][1], /name: macos-pending/);
+  assert.match(retentions[1][1], /name: image-model-smoke-windows/);
+  assert.match(retentions[2][1], /name: macos-pending/);
   assert.match(
     build,
     /gh release create "\$tag" --repo "\$GITHUB_REPOSITORY" --draft/,
@@ -308,4 +309,20 @@ test("staged zip tampering is detected by verification", () => {
   fs.appendFileSync(path.join(output, `PowerAI-${version}-win-x64.zip`), "tampered");
   assert.throws(() => execFileSync(process.execPath, [windowsScript, "verify", output, version], { stdio: "ignore" }));
   fs.rmSync(directory, { recursive: true, force: true });
+});
+
+
+test("Windows image acceptance uses the packaged binary and cannot pass without credentials", () => {
+  const build = fs.readFileSync(path.join(root, ".github/workflows/build-release.yml"), "utf8");
+  const lane = build.slice(build.indexOf("      - name: Check real model image credentials"), build.indexOf("      - name: Retain Windows artifacts"));
+  assert.ok(lane.length > 0);
+  assert.match(lane, /POWERAI_SMOKE_API_KEY: \$\{\{ secrets\.POWERAI_SMOKE_API_KEY \}\}/);
+  assert.match(lane, /IsNullOrWhiteSpace/);
+  assert.match(lane, /status = 'skipped'; passed = \$false/);
+  assert.match(lane, /if: steps.image_credentials.outputs.available == 'true'/);
+  assert.match(lane, /out\/win-unpacked\/resources\/bundled-powerai-agent\/win32-x64\/powerai-agent\.exe/);
+  assert.match(lane, /bun tests\/manual\/image-model-smoke\/verify\.ts/);
+  assert.match(lane, /if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
+  assert.doesNotMatch(lane, /continue-on-error|gh secret set/);
+  assert.match(lane, /GITHUB_STEP_SUMMARY/);
 });
