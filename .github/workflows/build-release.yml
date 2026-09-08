@@ -74,7 +74,7 @@ jobs:
     needs: [guard, approve]
     runs-on: windows-2025
     environment: release
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
       - name: Checkout exact desktop source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -215,6 +215,75 @@ jobs:
             ${{ runner.temp }}/image-model-smoke-windows/run-config.json
             ${{ runner.temp }}/image-model-smoke-windows/events.json
             ${{ runner.temp }}/image-model-smoke-windows/stderr.log
+
+      # Failure continuity acceptance drives the packaged Desktop and its bundled
+      # Agent through injected provider/runtime/desktop/disk failures and checks
+      # that every case terminates visibly, keeps its transcript, resumes the same
+      # durable session and answers the next message. It needs the real gateway
+      # credential and the harness shipped with the desktop commit. Advisory
+      # until two consecutive green Windows runs, then promoted to a blocking
+      # gate like the spreadsheet budget lane above.
+      - name: Check failure continuity acceptance prerequisites
+        id: failure_continuity
+        shell: pwsh
+        env:
+          POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
+        run: |
+          $evidenceDir = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
+          $reason = $null
+          if (-not (Test-Path 'powerai-desktop/tests/manual/failure-continuity/matrix.ts')) {
+            $reason = 'The desktop commit does not ship tests/manual/failure-continuity; packaged failure continuity acceptance was NOT run.'
+          } elseif ([string]::IsNullOrWhiteSpace($env:POWERAI_SMOKE_API_KEY)) {
+            $reason = 'POWERAI_SMOKE_API_KEY is missing; packaged failure continuity acceptance was NOT run.'
+          }
+          if ($reason) {
+            'available=false' >> $env:GITHUB_OUTPUT
+            Write-Host "::warning::SKIPPED: $reason"
+            "Failure continuity: SKIPPED — $reason" >> $env:GITHUB_STEP_SUMMARY
+            @{ status = 'skipped'; passed = $false; reason = $reason } | ConvertTo-Json | Set-Content (Join-Path $evidenceDir 'matrix.json')
+          } else {
+            'available=true' >> $env:GITHUB_OUTPUT
+          }
+
+      - name: Set up Node for the failure continuity driver
+        if: steps.failure_continuity.outputs.available == 'true'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Verify packaged failure continuity (advisory)
+        id: failure_continuity_matrix
+        if: steps.failure_continuity.outputs.available == 'true'
+        continue-on-error: true
+        timeout-minutes: 45
+        shell: pwsh
+        working-directory: powerai-desktop
+        env:
+          POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
+        run: |
+          $executable = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
+          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          node --import tsx tests/manual/failure-continuity/matrix.ts "--app=$executable" "--evidence=$evidence" --workers=2
+          if ($LASTEXITCODE -ne 0) {
+            "Failure continuity: FAILED (advisory) — see the failure-continuity-windows artifact, matrix.json lists every case." >> $env:GITHUB_STEP_SUMMARY
+            exit $LASTEXITCODE
+          }
+          'Failure continuity: PASSED — packaged Windows matrix green.' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Report advisory failure continuity outcome
+        if: steps.failure_continuity.outputs.available == 'true' && steps.failure_continuity_matrix.outcome != 'success'
+        shell: pwsh
+        run: Write-Host "::warning::Failure continuity acceptance did not pass (advisory); inspect the failure-continuity-windows artifact before promoting this build."
+
+      - name: Retain failure continuity evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: failure-continuity-windows
+          if-no-files-found: warn
+          retention-days: 3
+          path: ${{ runner.temp }}/failure-continuity-windows/
 
       - name: Retain Windows artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
