@@ -74,7 +74,7 @@ jobs:
     needs: [guard, approve]
     runs-on: windows-2025
     environment: release
-    timeout-minutes: 120
+    timeout-minutes: 150
     steps:
       - name: Checkout exact desktop source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -256,7 +256,7 @@ jobs:
         id: failure_continuity_matrix
         if: steps.failure_continuity.outputs.available == 'true'
         continue-on-error: true
-        timeout-minutes: 45
+        timeout-minutes: 75
         shell: pwsh
         working-directory: powerai-desktop
         env:
@@ -278,9 +278,23 @@ jobs:
         shell: pwsh
         run: Write-Host "::warning::Failure continuity acceptance did not pass (advisory); inspect the failure-continuity-windows artifact before promoting this build."
 
+      # A timed-out or crashed case can leave product processes holding files
+      # under the evidence directory; stop only those (matched by command
+      # line, never by bare name) so the upload cannot fail on a locked file.
+      - name: Release failure continuity evidence locks
+        if: always() && steps.failure_continuity.outputs.available == 'true'
+        shell: pwsh
+        run: |
+          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match [regex]::Escape($evidence) } | ForEach-Object {
+            Write-Host "Stopping leftover process $($_.ProcessId): $($_.Name)"
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+          }
+
       - name: Retain failure continuity evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
+        continue-on-error: true
         with:
           name: failure-continuity-windows
           if-no-files-found: warn
