@@ -261,6 +261,8 @@ jobs:
         working-directory: powerai-desktop
         env:
           POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
+          # One managed LibreOffice download per run; later cases mount it.
+          POWERAI_P0_ENGINE_CACHE: ${{ runner.temp }}\powerai-p0-engine
         run: |
           $executable = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
           $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
