@@ -220,9 +220,11 @@ jobs:
       # Agent through injected provider/runtime/desktop/disk failures and checks
       # that every case terminates visibly, keeps its transcript, resumes the same
       # durable session and answers the next message. It needs the real gateway
-      # credential and the harness shipped with the desktop commit. Advisory
-      # until two consecutive green Windows runs, then promoted to a blocking
-      # gate like the spreadsheet budget lane above.
+      # credential and the harness shipped with the desktop commit. Promoted to
+      # a blocking gate after three consecutive green advisory runs (the
+      # v0.1.39-dev.10, dev.11 and dev.12 builds), like the spreadsheet budget
+      # lane above: a failure here now stops the release, and the evidence
+      # artifact below carries every case's state for diagnosis.
       - name: Check failure continuity acceptance prerequisites
         id: failure_continuity
         shell: pwsh
@@ -252,10 +254,9 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify packaged failure continuity (advisory)
+      - name: Verify packaged failure continuity
         id: failure_continuity_matrix
         if: steps.failure_continuity.outputs.available == 'true'
-        continue-on-error: true
         timeout-minutes: 75
         shell: pwsh
         working-directory: powerai-desktop
@@ -268,15 +269,10 @@ jobs:
           $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
           node --import tsx tests/manual/failure-continuity/matrix.ts "--app=$executable" "--evidence=$evidence" --workers=2
           if ($LASTEXITCODE -ne 0) {
-            "Failure continuity: FAILED (advisory) — see the failure-continuity-windows artifact, matrix.json lists every case." >> $env:GITHUB_STEP_SUMMARY
+            "Failure continuity: FAILED — the release stops here; see the failure-continuity-windows artifact, matrix.json lists every case." >> $env:GITHUB_STEP_SUMMARY
             exit $LASTEXITCODE
           }
           'Failure continuity: PASSED — packaged Windows matrix green.' >> $env:GITHUB_STEP_SUMMARY
-
-      - name: Report advisory failure continuity outcome
-        if: steps.failure_continuity.outputs.available == 'true' && steps.failure_continuity_matrix.outcome != 'success'
-        shell: pwsh
-        run: Write-Host "::warning::Failure continuity acceptance did not pass (advisory); inspect the failure-continuity-windows artifact before promoting this build."
 
       # A timed-out or crashed case can leave product processes holding files
       # under the evidence directory; stop only those (matched by command
