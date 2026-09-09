@@ -1,10 +1,10 @@
-name: Acceptance - packaged Windows failure continuity
+name: Acceptance - packaged Windows verification
 
-# Builds the unsigned Windows package for exact desktop/agent commits and runs the
-# packaged failure continuity matrix against the real gateway. Nothing is
-# published: this is how driver or product changes are validated on Windows
-# without creating a dev release. Unlike the advisory lane in the release
-# build, a failing matrix fails this workflow.
+# Builds the unsigned Windows package for exact desktop/agent commits and runs a
+# packaged acceptance suite (failure continuity matrix or document capabilities)
+# against the real gateway. Nothing is published: this is how driver or product
+# changes are validated on Windows without creating a dev release. Unlike the
+# advisory lane in the release build, a failing suite fails this workflow.
 
 on:
   workflow_dispatch:
@@ -17,8 +17,16 @@ on:
         description: Exact 40-character agent commit (any branch)
         required: true
         type: string
+      suite:
+        description: Which packaged acceptance to run
+        required: false
+        default: failure-continuity
+        type: choice
+        options:
+          - failure-continuity
+          - document-capabilities
       cases:
-        description: Comma-separated case ids (empty = full matrix)
+        description: failure-continuity only - comma-separated case ids (empty = full matrix)
         required: false
         default: ""
         type: string
@@ -80,11 +88,12 @@ jobs:
         env:
           DESKTOP_REF: ${{ inputs.desktop_ref }}
           AGENT_REF: ${{ inputs.agent_ref }}
+          SUITE: ${{ inputs.suite }}
         run: |
           set -euo pipefail
           test "$(git -C powerai-desktop rev-parse HEAD)" = "$DESKTOP_REF"
           test "$(git -C powerai-agent rev-parse HEAD)" = "$AGENT_REF"
-          test -f powerai-desktop/tests/manual/failure-continuity/matrix.ts
+          test -f "powerai-desktop/tests/manual/${SUITE}/$([ "$SUITE" = failure-continuity ] && echo matrix.ts || echo verify.ts)"
 
       - name: Set up Bun
         uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
@@ -134,26 +143,31 @@ jobs:
         with:
           node-version: 22
 
-      - name: Verify packaged failure continuity
+      - name: Verify packaged acceptance suite
         timeout-minutes: 75
         shell: pwsh
         working-directory: powerai-desktop
         env:
           POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
           POWERAI_P0_ENGINE_CACHE: ${{ runner.temp }}\powerai-p0-engine
+          SUITE: ${{ inputs.suite }}
           CASES: ${{ inputs.cases }}
           WORKERS: ${{ inputs.workers }}
         run: |
           $executable = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
           $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
-          $arguments = @('--import', 'tsx', 'tests/manual/failure-continuity/matrix.ts', "--app=$executable", "--evidence=$evidence", "--workers=$env:WORKERS")
-          if (-not [string]::IsNullOrWhiteSpace($env:CASES)) { $arguments += "--cases=$env:CASES" }
+          if ($env:SUITE -eq 'failure-continuity') {
+            $arguments = @('--import', 'tsx', 'tests/manual/failure-continuity/matrix.ts', "--app=$executable", "--evidence=$evidence", "--workers=$env:WORKERS")
+            if (-not [string]::IsNullOrWhiteSpace($env:CASES)) { $arguments += "--cases=$env:CASES" }
+          } else {
+            $arguments = @('--import', 'tsx', "tests/manual/$env:SUITE/verify.ts", "--app=$executable", "--evidence=$evidence")
+          }
           node @arguments
           if ($LASTEXITCODE -ne 0) {
-            "Failure continuity: FAILED - see the failure-continuity-windows artifact, matrix.json lists every case." >> $env:GITHUB_STEP_SUMMARY
+            "$env:SUITE acceptance: FAILED - see the failure-continuity-windows artifact." >> $env:GITHUB_STEP_SUMMARY
             exit $LASTEXITCODE
           }
-          'Failure continuity: PASSED - packaged Windows matrix green.' >> $env:GITHUB_STEP_SUMMARY
+          "$env:SUITE acceptance: PASSED on the packaged Windows build." >> $env:GITHUB_STEP_SUMMARY
 
       - name: Release failure continuity evidence locks
         if: always()
