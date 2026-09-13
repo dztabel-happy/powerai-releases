@@ -40,7 +40,12 @@ macOS 仅提供 arm64（Apple Silicon）。Intel 机型不在当前发布范围�
 - `PowerAI-X.Y.Z-win-x64.exe`
 - 对应 blockmap
 - `latest.yml`
+- `PowerAI-X.Y.Z-win-x64.zip`
+- `powerai-staged-update.json`（Windows 秒切更新 ZIP 的版本、大小和 SHA-512）
 - 发布 ARM64 时增加安装包、blockmap 与 `latest-win-arm64.yml`
+
+所有平台共用 `release-provenance.json`，记录 Desktop / Agent 来源提交及制品 SHA-256。
+macOS 追加制品时扩展同一份来源清单；不得修改已发布 Windows 制品的摘要。
 
 ## 4. 原子发布
 
@@ -79,7 +84,7 @@ macOS（公证通过后追加到同一个 Release）：
 - “设置 → 关于 → 检查更新”保留为手动入口。
 - 更新失败必须保留当前可用版本，并向用户显示可重试错误。
 
-## 6. Windows 真机验收
+## 6. 发布验收
 
 安装态升级验收统一从本仓库触发，私有 `powerai-desktop` 不保留重复的 Actions 入口：
 
@@ -96,6 +101,8 @@ dev 验收选择 `target_channel=dev`：从已安装正式版进入关于页，�
 
 升级结果同时写入日志、Job Summary 和仅包含验收 JSON 的 artifact（3 天）。上传步骤保持独立，不能用上传失败掩盖功能判据，也不能把功能失败改报通过。升级和 swap helper 等验收仍可独立手动运行，不重复构建或覆盖已发布安装包。
 
+此工作流在 Windows runner 上使用隔离的合成测试配置，检查版本升级、测试标记保留、
+文档转换和窗口安全区。它不替代真实账号、完整历史库迁移、手机 relay 或 macOS 安装态升级验收。
 
 内测版本发布后，在真实 Windows 机器上使用已经安装的旧版本验证：
 
@@ -115,20 +122,21 @@ macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep
 `spctl --assess` 放行。这三项由 `finalize-notarization` 强制执行，任何一项不过
 就不追加 macOS 制品。
 
-macOS 自动更新（旧版→新版）已于 2026-08-31 在 `v0.1.38-dev.1` 上验收：本机
+2026-08-31 的 macOS 历史验收记录覆盖更新发现、下载与校验：本机
 0.1.0 arm64 包在隔离环境启动，从镜像 dev 通道解析出 `latest-arm64` 频道、发现
 `0.1.38-dev.1`、下载 337MB zip 并通过 sha512 校验，界面给出"重启更新"。落盘
-文件的 sha512 与 Release 中的制品逐字节一致。
+文件的 sha512 与 Release 中的制品逐字节一致。该记录未覆盖实际安装和新版启动，
+不能作为完整旧版→新版升级通过的证据；涉及更新链路改动时应另行记录安装态结果。
 
 后续每个引入 macOS 制品的版本按成本分级复核（2026-09-01 起，v0.1.38-dev.2
 实测后修订——那次按旧要求下了 700MB 制品本地验签，四项全过但全是重复劳动）：
 
 - **dev 版（默认）**：只做免费的**尺寸核对**——GitHub API 的 asset size 必须
   等于 `latest-mac.yml` / `latest-arm64-mac.yml` 声明的 size，dmg 与 zip 都核。
-  这一条足以抓住本节唯一的残余失效模式：dmg 在 staple 后字节会变（尺寸必变），
-  只有 `sync-dmg` 刷新过、声明与实物才对得上。签名/公证/装订/`spctl` 四项由
-  `finalize-notarization` 在 CI 里强制（任何一项不过就不追加制品），
-  本地重跑不新增保障。
+  这是制品与元数据的一致性快速检查，可以发现装订后未刷新元数据等尺寸不一致问题，
+  不代替摘要校验或安装运行验证。签名/公证/装订/`spctl` 四项和上传后摘要核对由
+  `finalize-notarization` 在 CI 里执行；常规 dev 不必重复下载整包验签。
+  签名、打包或更新链路有改动时，补充对应平台实测并记录验证边界。
 - **正式版、或任一尺寸对不上时**：完整下载制品，本地复核四件套
   （`codesign --verify --deep --strict`、Authority 为 Developer ID、
   `spctl --assess` 放行、zip sha512 与清单逐字节一致），并核对
