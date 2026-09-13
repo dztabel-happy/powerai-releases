@@ -2,7 +2,8 @@
 
 ## 1. 发布边界
 
-- 本仓库只公开安装包、自动更新元数据和发行说明。
+- dev、正式版构建与发布验收统一由本公开仓库的 GitHub Actions 执行。
+- 本仓库公开发布工作流、安装包、自动更新元数据、发行说明及专用测试产生的验收结果。
 - 源代码和发布凭据不得写入 Git 历史、制品或日志。
 
 ## 2. 版本规则
@@ -80,6 +81,22 @@ macOS（公证通过后追加到同一个 Release）：
 
 ## 6. Windows 真机验收
 
+安装态升级验收统一从本仓库触发，私有 `powerai-desktop` 不保留重复的 Actions 入口：
+
+```bash
+gh workflow run verify-desktop-update.yml --repo dztabel-happy/powerai-releases --ref main \
+  -f desktop_ref=<40位验收脚本提交> \
+  -f from_version=0.1.38 -f to_version=0.1.39 \
+  -f target_channel=stable -f require_windows_signature=false
+```
+
+`desktop_ref` 固定验收脚本版本，与安装包自身的来源清单分别记录。测试脚本保留在私有源码仓库，通过现有 `release` environment 的只读密钥读取；不上传源码目录或用户真实数据。
+
+dev 验收选择 `target_channel=dev`：从已安装正式版进入关于页，打开预发布开关并在不重启应用的情况下更新。目标必须是该通道当前最高的公开版本；正式版比 dev 新时，dev 通道指向正式版，验收仍应成立。`require_windows_signature` 只控制来源安装包及旧程序的 Authenticode 检查，与工作流所在仓库是否公开无关。
+
+升级结果同时写入日志、Job Summary 和仅包含验收 JSON 的 artifact（3 天）。上传步骤保持独立，不能用上传失败掩盖功能判据，也不能把功能失败改报通过。升级和 swap helper 等验收仍可独立手动运行，不重复构建或覆盖已发布安装包。
+
+
 内测版本发布后，在真实 Windows 机器上使用已经安装的旧版本验证：
 
 1. 发现新版本；
@@ -127,5 +144,5 @@ macOS 自动更新（旧版→新版）已于 2026-08-31 在 `v0.1.38-dev.1` 上
 - GitHub Release 中的安装包、更新元数据和来源证明是发布记录，不自动删除。
 - GitHub Actions 构建中间产物保留 1 天，只用于同一次工作流内传递。唯一例外是
   待公证的 macOS 签名包（`macos-pending`，保留 14 天）：它要跨工作流交给
-  `finalize-notarization`，且必须活过 Apple 的排队时间。诊断证据保留 3 天。
+  `finalize-notarization`，且必须活过 Apple 的排队时间。诊断证据保留 3 天；需要逐图复核的工作簿保真和标题栏截图证据保留 7 天。
 - 清理 Actions 中间产物不得删除 Release 资产，也不得改变已发布版本。
