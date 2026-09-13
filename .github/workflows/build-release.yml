@@ -248,11 +248,37 @@ jobs:
             'available=true' >> $env:GITHUB_OUTPUT
           }
 
-      - name: Set up Node for the failure continuity driver
-        if: steps.failure_continuity.outputs.available == 'true'
+      - name: Set up Node for packaged acceptance drivers
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
         with:
           node-version: 22
+
+      # Exercise actual Windows WCO geometry and hit-testing before publication.
+      # This shares the same driver used locally on macOS; no gateway is needed.
+      - name: Verify packaged titlebar and panel layout
+        timeout-minutes: 15
+        shell: pwsh
+        working-directory: powerai-desktop
+        env:
+          POWERAI_P0_ENGINE_CACHE: ${{ runner.temp }}\powerai-p0-engine
+        run: |
+          $env:POWERAI_BINARY = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
+          $env:PANEL_ACCEPTANCE_OUT = Join-Path $env:RUNNER_TEMP 'titlebar-windows'
+          node --import tsx tests/manual/layout-panel-system/drive-titlebar.ts
+          if ($LASTEXITCODE -ne 0) {
+            'Titlebar layout: FAILED — publication is blocked; see titlebar-windows.' >> $env:GITHUB_STEP_SUMMARY
+            exit $LASTEXITCODE
+          }
+          'Titlebar layout: PASSED — home, conversation, sidebar animation and extensions on native Windows.' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Retain titlebar layout evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: titlebar-windows
+          if-no-files-found: warn
+          retention-days: 7
+          path: ${{ runner.temp }}/titlebar-windows/
 
       - name: Verify packaged failure continuity
         id: failure_continuity_matrix
