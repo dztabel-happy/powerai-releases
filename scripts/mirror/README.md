@@ -12,16 +12,27 @@ because a script that exists on one machine is a script nobody can review.
 ## Deploying a change
 
 ```bash
-scp -P 56227 -i ~/.ssh/id_ed25519 scripts/mirror/powerai-release-mirror.py \
-  root@207.57.132.199:/usr/local/bin/powerai-release-mirror.py
-ssh hk-relay 'chmod 755 /usr/local/bin/powerai-release-mirror.py && /usr/local/bin/powerai-release-mirror.py'
+# Configure this alias with the current release VPS host, port and identity in ~/.ssh/config.
+release_host="${POWERAI_RELEASE_SSH_HOST:?Set the current release VPS SSH alias}"
+scp scripts/mirror/powerai-release-mirror.py \
+  "$release_host:/usr/local/bin/powerai-release-mirror.py"
+ssh "$release_host" 'chmod 755 /usr/local/bin/powerai-release-mirror.py && /usr/local/bin/powerai-release-mirror.py'
 ```
 
-Then check both channels report the tags you expect:
+Then inspect both channel fingerprints. Each contains the tag followed by the
+sorted asset names and sizes:
 
 ```bash
-ssh hk-relay 'cat /var/www/powerai-releases/latest/.tag /var/www/powerai-releases/dev/.tag'
+ssh "$release_host" 'cat /var/www/powerai-releases/latest/.fingerprint /var/www/powerai-releases/dev/.fingerprint'
+gh release view vX.Y.Z --repo dztabel-happy/powerai-releases \
+  --json tagName,assets --jq '{tag: .tagName, assets: [.assets[] | {name, size}]}'
 ```
+
+Compare each channel with its expected public release. Repeat the mirror and
+comparison after macOS notarization appends assets: matching `.tag` files alone
+cannot prove those later files are present. Fingerprints check the mirrored
+asset set; the mirror separately verifies each provenance-listed file's SHA-256
+before installing the channel directory.
 
 ## Why a fingerprint, not a tag
 
