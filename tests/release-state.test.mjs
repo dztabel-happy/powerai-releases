@@ -14,6 +14,32 @@ function sha512(value) {
   return crypto.createHash("sha512").update(value).digest("base64");
 }
 
+test("public update acceptance rejects unsafe dispatches and uploads only synthetic evidence", () => {
+  const workflow = fs.readFileSync(path.join(root, ".github/workflows/verify-desktop-update.yml"), "utf8");
+  assert.match(workflow, /workflow_dispatch:/);
+  assert.doesNotMatch(workflow, /pull_request:|push:|contents: write|gh release (?:create|upload|edit)/);
+  assert.match(workflow, /environment: release/);
+  assert.match(workflow, /persist-credentials: false/);
+  assert.match(workflow, /ref: \$\{\{ inputs.desktop_ref \}\}/);
+  assert.match(workflow, /node tests\/manual\/auto-update\/validate-release.mjs/);
+  assert.match(workflow, /node tests\/manual\/auto-update\/verify.mjs/);
+  const artifacts = workflow.split(/\n(?=      - )/).filter((step) => step.includes("actions/upload-artifact@"));
+  assert.equal(artifacts.length, 1);
+  assert.match(artifacts[0], /retention-days: 3/);
+  assert.match(artifacts[0], /path: \$\{\{ runner.temp \}\}\/update-acceptance-windows.json\s*$/);
+
+  const guard = workflow.match(/run: \|\n([\s\S]*?)\n      - name: Checkout/)[1]
+    .split("\n").map((line) => line.replace(/^          /, "")).join("\n");
+  const env = { ...process.env, GITHUB_REF_NAME: "main", DESKTOP_REF: "a".repeat(40), FROM_VERSION: "0.1.38", TO_VERSION: "0.1.39", TARGET_CHANNEL: "stable" };
+  const run = (overrides = {}) => execFileSync("bash", ["-c", guard], { env: { ...env, ...overrides }, stdio: "pipe" });
+  run();
+  run({ TARGET_CHANNEL: "dev" });
+  run({ TARGET_CHANNEL: "dev", TO_VERSION: "0.1.39-dev.24" });
+  for (const overrides of [{ GITHUB_REF_NAME: "other" }, { DESKTOP_REF: "main" }, { FROM_VERSION: "../source" }, { TO_VERSION: "0.1.39; false" }, { TARGET_CHANNEL: "other" }]) {
+    assert.throws(() => run(overrides));
+  }
+});
+
 test("release state is immutable and validated", () => {
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "powerai-release-state-"),
@@ -57,7 +83,7 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /PowerAI-\$\{\{ needs\.guard\.outputs\.version \}\}-win-x64\.zip/);
   assert.match(build, /tests\/manual\/spreadsheet-preview-budget\/verify\.ts/);
   assert.match(build, /spreadsheet-preview-budget-windows/);
-  // Build intermediates stay short-lived: only diagnosis evidence (3 days)
+  // Build intermediates stay short-lived: only diagnosis evidence (3/7 days)
   // and the signed macOS app awaiting notarization (14 days) outlive their
   // run. The macOS exception is load-bearing — Apple's queue is unbounded,
   // and the finalizer fetches that artifact once the answer arrives.
@@ -71,11 +97,13 @@ test("release workflows keep private source and credentials behind manual releas
     ]);
   assert.deepEqual(
     retentions.map(([line]) => line),
-    ["retention-days: 3", "retention-days: 3", "retention-days: 14"],
+    ["retention-days: 3", "retention-days: 3", "retention-days: 7", "retention-days: 3", "retention-days: 14"],
   );
   assert.match(retentions[0][1], /name: spreadsheet-preview-budget-windows/);
   assert.match(retentions[1][1], /name: image-model-smoke-windows/);
-  assert.match(retentions[2][1], /name: macos-pending/);
+  assert.match(retentions[2][1], /name: titlebar-windows/);
+  assert.match(retentions[3][1], /name: failure-continuity-windows/);
+  assert.match(retentions[4][1], /name: macos-pending/);
   assert.match(
     build,
     /gh release create "\$tag" --repo "\$GITHUB_REPOSITORY" --draft/,
@@ -314,7 +342,10 @@ test("staged zip tampering is detected by verification", () => {
 
 test("Windows image acceptance uses the packaged binary and cannot pass without credentials", () => {
   const build = fs.readFileSync(path.join(root, ".github/workflows/build-release.yml"), "utf8");
-  const lane = build.slice(build.indexOf("      - name: Check real model image credentials"), build.indexOf("      - name: Retain Windows artifacts"));
+  const start = build.indexOf("      - name: Check real model image credentials");
+  const end = build.indexOf("      - name: Retain real model image evidence");
+  assert.ok(start >= 0 && end > start);
+  const lane = build.slice(start, end);
   assert.ok(lane.length > 0);
   assert.match(lane, /POWERAI_SMOKE_API_KEY: \$\{\{ secrets\.POWERAI_SMOKE_API_KEY \}\}/);
   assert.match(lane, /IsNullOrWhiteSpace/);
