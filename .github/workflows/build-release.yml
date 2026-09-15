@@ -308,6 +308,12 @@ jobs:
           if-no-files-found: warn
           path: ${{ runner.temp }}/arm64-install/evidence.json
 
+      - name: Record ARM64 installer crash details
+        if: failure() && matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          Get-WinEvent -FilterHashtable @{LogName='Application'; StartTime=(Get-Date).AddMinutes(-15); Id=1000,1001} -ErrorAction SilentlyContinue | Format-List TimeCreated,Id,Message
+
       - name: Verify packaged titlebar and panel layout
         timeout-minutes: 15
         shell: pwsh
@@ -377,6 +383,9 @@ jobs:
           path: ${{ runner.temp }}/failure-continuity-windows${{ matrix.evidence_suffix }}/
 
       - name: Retain Windows artifacts
+        # A failed isolated candidate must remain inspectable without rebuilding.
+        # Release-mode artifacts keep the existing success-only requirement.
+        if: success() || (failure() && inputs.mode == 'arm64-candidate' && matrix.arch == 'arm64')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-${{ matrix.arch }}
