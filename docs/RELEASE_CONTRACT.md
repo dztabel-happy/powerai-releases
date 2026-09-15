@@ -154,3 +154,28 @@ macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep
   待公证的 macOS 签名包（`macos-pending`，保留 14 天）：它要跨工作流交给
   `finalize-notarization`，且必须活过 Apple 的排队时间。诊断证据保留 3 天；需要逐图复核的工作簿保真和标题栏截图证据保留 7 天。
 - 清理 Actions 中间产物不得删除 Release 资产，也不得改变已发布版本。
+
+## Windows ARM64 (optional architecture)
+
+The release workflow keeps Windows x64 and macOS arm64 as its default. Setting
+`windows_arm64=true` adds a native `windows-11-arm` build from the **same Desktop
+and Agent commits**, with the same packaged acceptance gates. No separate product
+branch or application identity is used. Both selected Windows jobs must pass before
+Windows publication. macOS notarization is unchanged.
+
+For pre-merge certification, use `mode=arm64-candidate`: only the ARM64 job runs,
+full 40-character source commits remain required, and the existing approval and
+private-source environments still apply. This mode accepts feature commits but
+**cannot publish a release or a notarization marker**. Its installer is retained as
+a short-lived Actions artifact. `mode=release` still requires current main tips.
+
+Windows x64 keeps `latest.yml` and `powerai-staged-update.json` without a format
+change. ARM64 adds `latest-win-arm64.yml` and `powerai-staged-update-arm64.json`.
+The ARM64 metadata is renamed from its isolated build output before flattening,
+so it cannot replace x64 metadata. Both architectures are verified against their
+own installer/ZIP hashes and recorded in the same release provenance. The mirror
+already copies and verifies these assets without architecture-specific logic.
+
+`windows-release.mjs prepare|provenance|verify` takes an optional final target
+argument: `x64` (the unchanged default), `arm64`, or `all`. Candidate verification
+is not a production capacity, physical laptop, or long-running task claim.

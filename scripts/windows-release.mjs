@@ -58,11 +58,17 @@ function metadata(file) {
   return { version: scalar(version.replace(/^version:\s*/, "")), entries };
 }
 
-const STAGED_MANIFEST_NAME = "powerai-staged-update.json";
+const updateMetadata = (arch) => arch === "arm64" ? "latest-win-arm64.yml" : "latest.yml";
+const stagedManifest = (arch) => arch === "arm64" ? "powerai-staged-update-arm64.json" : "powerai-staged-update.json";
+const architectures = (target = "x64") => {
+  if (target === "all") return ["x64", "arm64"];
+  if (target === "x64" || target === "arm64") return [target];
+  fail(`Unsupported Windows architecture: ${target}`);
+};
 
-function names(version) {
-  const installer = `PowerAI-${version}-win-x64.exe`;
-  return [installer, `${installer}.blockmap`, "latest.yml", `PowerAI-${version}-win-x64.zip`];
+function names(version, arch) {
+  const installer = `PowerAI-${version}-win-${arch}.exe`;
+  return [installer, `${installer}.blockmap`, updateMetadata(arch), `PowerAI-${version}-win-${arch}.zip`];
 }
 
 /**
@@ -70,11 +76,11 @@ function names(version) {
  * the zip against this manifest, pre-extracts it while the app runs, and
  * swaps directories at restart instead of running the NSIS installer.
  */
-function writeStagedManifest(directory, version) {
-  const zipName = `PowerAI-${version}-win-x64.zip`;
+function writeStagedManifest(directory, version, arch) {
+  const zipName = `PowerAI-${version}-win-${arch}.zip`;
   const zipPath = path.join(directory, zipName);
   fs.writeFileSync(
-    path.join(directory, STAGED_MANIFEST_NAME),
+    path.join(directory, stagedManifest(arch)),
     `${JSON.stringify(
       {
         schemaVersion: 1,
@@ -87,9 +93,9 @@ function writeStagedManifest(directory, version) {
   );
 }
 
-function verifyStagedManifest(directory, version) {
-  const manifest = JSON.parse(fs.readFileSync(path.join(directory, STAGED_MANIFEST_NAME), "utf8"));
-  const zipName = `PowerAI-${version}-win-x64.zip`;
+function verifyStagedManifest(directory, version, arch) {
+  const manifest = JSON.parse(fs.readFileSync(path.join(directory, stagedManifest(arch)), "utf8"));
+  const zipName = `PowerAI-${version}-win-${arch}.zip`;
   if (manifest.schemaVersion !== 1) fail("Staged manifest has an invalid schema version");
   if (manifest.version !== version) fail(`Staged manifest version ${manifest.version} does not match ${version}`);
   if (manifest.zip?.name !== zipName) fail(`Staged manifest does not reference ${zipName}`);
@@ -98,26 +104,36 @@ function verifyStagedManifest(directory, version) {
   if (manifest.zip.size !== fs.statSync(zipPath).size) fail("Staged manifest zip size does not match");
 }
 
-function verifyMetadata(directory, version) {
-  const installer = names(version)[0];
-  const value = metadata(path.join(directory, "latest.yml"));
+function verifyMetadata(directory, version, arch) {
+  const installer = names(version, arch)[0];
+  const value = metadata(path.join(directory, updateMetadata(arch)));
   if (value.version !== version) fail(`latest.yml version ${value.version} does not match ${version}`);
   const entry = value.entries.find((candidate) => candidate.url === installer);
   if (!entry) fail(`latest.yml does not reference ${installer}`);
   const file = path.join(directory, installer);
   if (entry.sha512 !== hash(file, "sha512", "base64")) fail("latest.yml installer sha512 does not match");
   if (entry.size !== fs.statSync(file).size) fail("latest.yml installer size does not match");
-  verifyStagedManifest(directory, version);
+  verifyStagedManifest(directory, version, arch);
 }
 
-function prepare(artifacts, output, version) {
+function prepare(artifacts, output, version, target = "x64") {
   if (!versionPattern.test(version)) fail("Invalid release version");
+  const arches = architectures(target);
   const files = filesUnder(artifacts);
   fs.rmSync(output, { recursive: true, force: true });
   fs.mkdirSync(output, { recursive: true });
-  for (const name of names(version)) fs.copyFileSync(findUnique(files, name), path.join(output, name));
-  writeStagedManifest(output, version);
-  verifyMetadata(output, version);
+  for (const arch of arches) {
+    for (const name of names(version, arch)) {
+      // electron-builder emits latest.yml per isolated Windows build. Rename
+      // only ARM64's copy, before merging; never overwrite x64's metadata.
+      const source = name === updateMetadata(arch)
+        ? path.join(path.dirname(findUnique(files, names(version, arch)[0])), "latest.yml")
+        : findUnique(files, name);
+      fs.copyFileSync(source, path.join(output, name));
+    }
+    writeStagedManifest(output, version, arch);
+    verifyMetadata(output, version, arch);
+  }
 }
 
 function assetHashes(directory) {
@@ -129,7 +145,7 @@ function assetHashes(directory) {
   );
 }
 
-function provenance(directory, version, desktopCommit, agentCommit, workflowRun) {
+function provenance(directory, version, desktopCommit, agentCommit, workflowRun, target = "x64") {
   if (!versionPattern.test(version)) fail("Invalid release version");
   if (!commitPattern.test(desktopCommit)) fail("Invalid desktop commit");
   if (!commitPattern.test(agentCommit)) fail("Invalid agent commit");
@@ -142,7 +158,7 @@ function provenance(directory, version, desktopCommit, agentCommit, workflowRun)
       {
         schemaVersion: 1,
         version,
-        platform: "windows-x64",
+        platform: target === "all" ? "windows-x64-arm64" : `windows-${architectures(target)[0]}`,
         signing: "unsigned-internal",
         desktopCommit,
         agentCommit,
@@ -155,13 +171,14 @@ function provenance(directory, version, desktopCommit, agentCommit, workflowRun)
   );
 }
 
-function verify(directory, version) {
-  const expected = [...names(version), STAGED_MANIFEST_NAME, "release-provenance.json"].sort();
+function verify(directory, version, target = "x64") {
+  const arches = architectures(target);
+  const expected = [...arches.flatMap((arch) => [...names(version, arch), stagedManifest(arch)]), "release-provenance.json"].sort();
   const actual = fs.readdirSync(directory).sort();
   if (JSON.stringify(actual) !== JSON.stringify(expected)) fail("Release directory contains missing or unexpected files");
-  verifyMetadata(directory, version);
+  for (const arch of arches) verifyMetadata(directory, version, arch);
   const value = JSON.parse(fs.readFileSync(path.join(directory, "release-provenance.json"), "utf8"));
-  if (value.schemaVersion !== 1 || value.version !== version || value.platform !== "windows-x64") {
+  if (value.schemaVersion !== 1 || value.version !== version || value.platform !== (target === "all" ? "windows-x64-arm64" : `windows-${arches[0]}`)) {
     fail("Invalid release provenance identity");
   }
   if (value.signing !== "unsigned-internal") fail("Invalid Windows signing declaration");
@@ -174,7 +191,7 @@ function verify(directory, version) {
 }
 
 const [command, ...args] = process.argv.slice(2);
-if (command === "prepare" && args.length === 3) prepare(...args);
-else if (command === "provenance" && args.length === 5) provenance(...args);
-else if (command === "verify" && args.length === 2) verify(...args);
+if (command === "prepare" && [3, 4].includes(args.length)) prepare(...args);
+else if (command === "provenance" && [5, 6].includes(args.length)) provenance(...args);
+else if (command === "verify" && [2, 3].includes(args.length)) verify(...args);
 else fail("Usage: windows-release.mjs <prepare|provenance|verify> [arguments]");

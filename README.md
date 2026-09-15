@@ -11,3 +11,8 @@ PowerAI 桌面端，支持 Windows x64 和 macOS Apple Silicon。
 - 其他验收：工作簿预览、swap helper、OfficeCLI 和打包后的会话连续性测试。
 
 输入、证据保留和发布边界见 [发布契约](docs/RELEASE_CONTRACT.md)。
+
+Windows ARM64 is an opt-in architecture of the same release workflow:
+`windows_arm64=true` includes it in publication; `mode=arm64-candidate` builds and
+checks feature commits without publishing. Existing dispatches keep Windows x64
+and macOS arm64. See [the architecture contract](docs/RELEASE_CONTRACT.md#windows-arm64-optional-architecture).
