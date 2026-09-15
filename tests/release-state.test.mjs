@@ -80,7 +80,7 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /needs: \[guard, windows-x64\]/);
   assert.match(build, /scripts\/windows-release\.mjs prepare/);
   assert.match(build, /retention-days: 1/);
-  assert.match(build, /PowerAI-\$\{\{ needs\.guard\.outputs\.version \}\}-win-x64\.zip/);
+  assert.match(build, /PowerAI-\$\{\{ needs\.guard\.outputs\.version \}\}-win-\$\{\{ matrix.arch \}\}\.zip/);
   assert.match(build, /tests\/manual\/spreadsheet-preview-budget\/verify\.ts/);
   assert.match(build, /spreadsheet-preview-budget-windows/);
   // Build intermediates stay short-lived: only diagnosis evidence (3/7 days)
@@ -351,7 +351,7 @@ test("Windows image acceptance uses the packaged binary and cannot pass without 
   assert.match(lane, /IsNullOrWhiteSpace/);
   assert.match(lane, /status = 'skipped'; passed = \$false/);
   assert.match(lane, /if: steps.image_credentials.outputs.available == 'true'/);
-  assert.match(lane, /out\/win-unpacked\/resources\/bundled-powerai-agent\/win32-x64\/powerai-agent\.exe/);
+  assert.match(lane, /out\/\$\{\{ matrix.unpacked \}\}\/resources\/bundled-powerai-agent\/win32-\$\{\{ matrix.arch \}\}\/powerai-agent\.exe/);
   assert.match(lane, /bun tests\/manual\/image-model-smoke\/verify\.ts/);
   assert.match(lane, /if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/);
   assert.doesNotMatch(lane, /continue-on-error|gh secret set/);

@@ -7,12 +7,23 @@ on:
         description: Exact release version
         required: true
         type: string
+      mode:
+        description: Publish a release, or certify an ARM64 candidate without publishing
+        required: false
+        default: release
+        type: choice
+        options: [release, arm64-candidate]
+      windows_arm64:
+        description: Include the Windows ARM64 build (Windows 11 on ARM)
+        required: false
+        default: false
+        type: boolean
       desktop_ref:
-        description: Exact 40-character desktop main commit
+        description: Exact 40-character desktop commit (main required for release)
         required: true
         type: string
       agent_ref:
-        description: Exact 40-character agent main commit
+        description: Exact 40-character agent commit (main required for release)
         required: true
         type: string
 
@@ -70,9 +81,13 @@ jobs:
       - run: echo 'Release approved'
 
   windows-x64:
-    name: Build unsigned Windows x64
+    name: Build unsigned Windows ${{ matrix.arch }}
     needs: [guard, approve]
-    runs-on: windows-2025
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(inputs.mode == 'arm64-candidate' && '[{"arch":"arm64","runner":"windows-11-arm","unpacked":"win-arm64-unpacked","evidence_suffix":"-arm64"}]' || inputs.windows_arm64 && '[{"arch":"x64","runner":"windows-2025","unpacked":"win-unpacked","evidence_suffix":""},{"arch":"arm64","runner":"windows-11-arm","unpacked":"win-arm64-unpacked","evidence_suffix":"-arm64"}]' || '[{"arch":"x64","runner":"windows-2025","unpacked":"win-unpacked","evidence_suffix":""}]') }}
+    runs-on: ${{ matrix.runner }}
     environment: release
     timeout-minutes: 150
     steps:
@@ -94,18 +109,21 @@ jobs:
           path: powerai-agent
           fetch-depth: 1
 
-      - name: Validate exact main commits
+      - name: Validate immutable source commits
         shell: bash
         env:
           VERSION: ${{ needs.guard.outputs.version }}
           DESKTOP_REF: ${{ inputs.desktop_ref }}
           AGENT_REF: ${{ inputs.agent_ref }}
+          RELEASE_MODE: ${{ inputs.mode }}
         run: |
           set -euo pipefail
           test "$(git -C powerai-desktop rev-parse HEAD)" = "$DESKTOP_REF"
           test "$(git -C powerai-agent rev-parse HEAD)" = "$AGENT_REF"
-          test "$(git -C powerai-desktop ls-remote origin refs/heads/main | cut -f1)" = "$DESKTOP_REF"
-          test "$(git -C powerai-agent ls-remote origin refs/heads/main | cut -f1)" = "$AGENT_REF"
+          if [ "$RELEASE_MODE" != arm64-candidate ]; then
+            test "$(git -C powerai-desktop ls-remote origin refs/heads/main | cut -f1)" = "$DESKTOP_REF"
+            test "$(git -C powerai-agent ls-remote origin refs/heads/main | cut -f1)" = "$AGENT_REF"
+          fi
           node -e "const fs=require('fs'); const file='powerai-desktop/package.json'; const value=JSON.parse(fs.readFileSync(file)); value.version=process.env.VERSION; fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\n')"
 
       - name: Set up Bun
@@ -126,7 +144,7 @@ jobs:
       - name: Prepare checksum-verified Electron distribution
         shell: bash
         run: |
-          electron_dist="$(cd powerai-desktop && node scripts/release/prepare-electron.mjs win32 x64 "$RUNNER_TEMP/electron")"
+          electron_dist="$(cd powerai-desktop && node scripts/release/prepare-electron.mjs win32 ${{ matrix.arch }} "$RUNNER_TEMP/electron")"
           echo "ELECTRON_DIST_PATH=$electron_dist" >> "$GITHUB_ENV"
 
       - name: Build unsigned Windows installer
@@ -135,14 +153,14 @@ jobs:
           CI: "true"
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
           NODE_OPTIONS: --max-old-space-size=6144
-        run: bun run build-win:x64
+        run: bun run build-win:${{ matrix.arch }}
 
       - name: Verify Windows artifacts
         shell: pwsh
         working-directory: powerai-desktop
         run: |
-          node scripts/release/verify-native-module.mjs --app out/win-unpacked/PowerAI.exe
-          $installer = 'out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe'
+          node scripts/release/verify-native-module.mjs --app out/${{ matrix.unpacked }}/PowerAI.exe
+          $installer = 'out/PowerAI-${{ needs.guard.outputs.version }}-win-${{ matrix.arch }}.exe'
           if (-not (Test-Path $installer)) { throw "Missing $installer" }
           if ((Get-AuthenticodeSignature -LiteralPath $installer).Status -ne 'NotSigned') { throw 'Expected unsigned internal installer' }
 
@@ -155,8 +173,8 @@ jobs:
         shell: pwsh
         working-directory: powerai-desktop
         run: |
-          $executable = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
-          $evidenceDir = Join-Path $env:RUNNER_TEMP 'spreadsheet-preview-budget-windows'
+          $executable = (Resolve-Path 'out/${{ matrix.unpacked }}/PowerAI.exe').Path
+          $evidenceDir = Join-Path $env:RUNNER_TEMP 'spreadsheet-preview-budget-windows${{ matrix.evidence_suffix }}'
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           $evidence = Join-Path $evidenceDir 'evidence.json'
           bun tests/manual/spreadsheet-preview-budget/verify.ts "--executable=$executable" "--evidence=$evidence"
@@ -165,10 +183,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: spreadsheet-preview-budget-windows
+          name: spreadsheet-preview-budget-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
           retention-days: 3
-          path: ${{ runner.temp }}/spreadsheet-preview-budget-windows/
+          path: ${{ runner.temp }}/spreadsheet-preview-budget-windows${{ matrix.evidence_suffix }}/
 
       - name: Check real model image credentials
         id: image_credentials
@@ -176,7 +194,7 @@ jobs:
         env:
           POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
         run: |
-          $evidenceDir = Join-Path $env:RUNNER_TEMP 'image-model-smoke-windows'
+          $evidenceDir = Join-Path $env:RUNNER_TEMP 'image-model-smoke-windows${{ matrix.evidence_suffix }}'
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           if ([string]::IsNullOrWhiteSpace($env:POWERAI_SMOKE_API_KEY)) {
             'available=false' >> $env:GITHUB_OUTPUT
@@ -196,8 +214,8 @@ jobs:
         env:
           POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
         run: |
-          $agent = (Resolve-Path 'out/win-unpacked/resources/bundled-powerai-agent/win32-x64/powerai-agent.exe').Path
-          $evidence = Join-Path $env:RUNNER_TEMP 'image-model-smoke-windows/evidence.json'
+          $agent = (Resolve-Path 'out/${{ matrix.unpacked }}/resources/bundled-powerai-agent/win32-${{ matrix.arch }}/powerai-agent.exe').Path
+          $evidence = Join-Path $env:RUNNER_TEMP 'image-model-smoke-windows${{ matrix.evidence_suffix }}/evidence.json'
           bun tests/manual/image-model-smoke/verify.ts "--agent=$agent" "--evidence=$evidence"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           'Image model smoke: PASSED — all four image codes verified.' >> $env:GITHUB_STEP_SUMMARY
@@ -206,15 +224,15 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: image-model-smoke-windows
+          name: image-model-smoke-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
           retention-days: 3
           path: |
-            ${{ runner.temp }}/image-model-smoke-windows/evidence.json
-            ${{ runner.temp }}/image-model-smoke-windows/config.json
-            ${{ runner.temp }}/image-model-smoke-windows/run-config.json
-            ${{ runner.temp }}/image-model-smoke-windows/events.json
-            ${{ runner.temp }}/image-model-smoke-windows/stderr.log
+            ${{ runner.temp }}/image-model-smoke-windows${{ matrix.evidence_suffix }}/evidence.json
+            ${{ runner.temp }}/image-model-smoke-windows${{ matrix.evidence_suffix }}/config.json
+            ${{ runner.temp }}/image-model-smoke-windows${{ matrix.evidence_suffix }}/run-config.json
+            ${{ runner.temp }}/image-model-smoke-windows${{ matrix.evidence_suffix }}/events.json
+            ${{ runner.temp }}/image-model-smoke-windows${{ matrix.evidence_suffix }}/stderr.log
 
       # Failure continuity acceptance drives the packaged Desktop and its bundled
       # Agent through injected provider/runtime/desktop/disk failures and checks
@@ -231,7 +249,7 @@ jobs:
         env:
           POWERAI_SMOKE_API_KEY: ${{ secrets.POWERAI_SMOKE_API_KEY }}
         run: |
-          $evidenceDir = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          $evidenceDir = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows${{ matrix.evidence_suffix }}'
           New-Item -ItemType Directory -Force -Path $evidenceDir | Out-Null
           $reason = $null
           if (-not (Test-Path 'powerai-desktop/tests/manual/failure-continuity/matrix.ts')) {
@@ -255,6 +273,28 @@ jobs:
 
       # Exercise actual Windows WCO geometry and hit-testing before publication.
       # This shares the same driver used locally on macOS; no gateway is needed.
+      - name: Checkout architecture acceptance tooling
+        if: matrix.arch == 'arm64'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: arm64-release-tools
+
+      - name: Verify ARM64 installation and document tools
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          node arm64-release-tools/scripts/windows-arm64-smoke.mjs "powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-arm64.exe" "$env:RUNNER_TEMP/arm64-install"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain ARM64 architecture evidence
+        if: always() && matrix.arch == 'arm64'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: arm64-install-evidence
+          retention-days: 3
+          if-no-files-found: warn
+          path: ${{ runner.temp }}/arm64-install/evidence.json
+
       - name: Verify packaged titlebar and panel layout
         timeout-minutes: 15
         shell: pwsh
@@ -262,11 +302,11 @@ jobs:
         env:
           POWERAI_P0_ENGINE_CACHE: ${{ runner.temp }}\powerai-p0-engine
         run: |
-          $env:POWERAI_BINARY = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
-          $env:PANEL_ACCEPTANCE_OUT = Join-Path $env:RUNNER_TEMP 'titlebar-windows'
+          $env:POWERAI_BINARY = (Resolve-Path 'out/${{ matrix.unpacked }}/PowerAI.exe').Path
+          $env:PANEL_ACCEPTANCE_OUT = Join-Path $env:RUNNER_TEMP 'titlebar-windows${{ matrix.evidence_suffix }}'
           node --import tsx tests/manual/layout-panel-system/drive-titlebar.ts
           if ($LASTEXITCODE -ne 0) {
-            'Titlebar layout: FAILED — publication is blocked; see titlebar-windows.' >> $env:GITHUB_STEP_SUMMARY
+            'Titlebar layout: FAILED — publication is blocked; see titlebar-windows${{ matrix.evidence_suffix }}.' >> $env:GITHUB_STEP_SUMMARY
             exit $LASTEXITCODE
           }
           'Titlebar layout: PASSED — home, conversation, sidebar animation and extensions on native Windows.' >> $env:GITHUB_STEP_SUMMARY
@@ -275,10 +315,10 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
         with:
-          name: titlebar-windows
+          name: titlebar-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
           retention-days: 7
-          path: ${{ runner.temp }}/titlebar-windows/
+          path: ${{ runner.temp }}/titlebar-windows${{ matrix.evidence_suffix }}/
 
       - name: Verify packaged failure continuity
         id: failure_continuity_matrix
@@ -291,11 +331,11 @@ jobs:
           # One managed LibreOffice download per run; later cases mount it.
           POWERAI_P0_ENGINE_CACHE: ${{ runner.temp }}\powerai-p0-engine
         run: |
-          $executable = (Resolve-Path 'out/win-unpacked/PowerAI.exe').Path
-          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          $executable = (Resolve-Path 'out/${{ matrix.unpacked }}/PowerAI.exe').Path
+          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows${{ matrix.evidence_suffix }}'
           node --import tsx tests/manual/failure-continuity/matrix.ts "--app=$executable" "--evidence=$evidence" --workers=2
           if ($LASTEXITCODE -ne 0) {
-            "Failure continuity: FAILED — the release stops here; see the failure-continuity-windows artifact, matrix.json lists every case." >> $env:GITHUB_STEP_SUMMARY
+            "Failure continuity: FAILED — the release stops here; see the failure-continuity-windows${{ matrix.evidence_suffix }} artifact, matrix.json lists every case." >> $env:GITHUB_STEP_SUMMARY
             exit $LASTEXITCODE
           }
           'Failure continuity: PASSED — packaged Windows matrix green.' >> $env:GITHUB_STEP_SUMMARY
@@ -307,7 +347,7 @@ jobs:
         if: always() && steps.failure_continuity.outputs.available == 'true'
         shell: pwsh
         run: |
-          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows'
+          $evidence = Join-Path $env:RUNNER_TEMP 'failure-continuity-windows${{ matrix.evidence_suffix }}'
           Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -and $_.CommandLine -match [regex]::Escape($evidence) } | ForEach-Object {
             Write-Host "Stopping leftover process $($_.ProcessId): $($_.Name)"
             Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
@@ -318,24 +358,25 @@ jobs:
         if: always()
         continue-on-error: true
         with:
-          name: failure-continuity-windows
+          name: failure-continuity-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
           retention-days: 3
-          path: ${{ runner.temp }}/failure-continuity-windows/
+          path: ${{ runner.temp }}/failure-continuity-windows${{ matrix.evidence_suffix }}/
 
       - name: Retain Windows artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: windows-x64
+          name: windows-${{ matrix.arch }}
           if-no-files-found: error
           retention-days: 1
           path: |
-            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe
-            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.exe.blockmap
-            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-x64.zip
+            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-${{ matrix.arch }}.exe
+            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-${{ matrix.arch }}.exe.blockmap
+            powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-${{ matrix.arch }}.zip
             powerai-desktop/out/latest.yml
 
   macos-arm64:
+    if: inputs.mode != 'arm64-candidate'
     name: Build and submit macOS arm64
     needs: [guard, approve]
     runs-on: macos-14
@@ -491,7 +532,8 @@ jobs:
           gh release upload "v$VERSION" --repo "$GITHUB_REPOSITORY" pending/notary-state.json --clobber
 
   publish-windows:
-    name: Verify and publish Windows x64
+    if: inputs.mode != 'arm64-candidate'
+    name: Verify and publish selected Windows architectures
     needs: [guard, windows-x64]
     runs-on: ubuntu-24.04
     permissions:
@@ -504,24 +546,25 @@ jobs:
       - name: Download Windows artifacts
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: windows-x64
-          path: build-artifacts/windows-x64
+          pattern: windows-*
+          path: build-artifacts
 
       - name: Validate exact release bundle
         env:
           VERSION: ${{ needs.guard.outputs.version }}
+          WINDOWS_ARCHES: ${{ inputs.windows_arm64 && 'all' || 'x64' }}
           DESKTOP_REF: ${{ inputs.desktop_ref }}
           AGENT_REF: ${{ inputs.agent_ref }}
         run: |
           set -euo pipefail
-          node scripts/windows-release.mjs prepare build-artifacts "$RUNNER_TEMP/release-assets" "$VERSION"
+          node scripts/windows-release.mjs prepare build-artifacts "$RUNNER_TEMP/release-assets" "$VERSION" "$WINDOWS_ARCHES"
           node scripts/windows-release.mjs provenance \
             "$RUNNER_TEMP/release-assets" \
             "$VERSION" \
             "$DESKTOP_REF" \
             "$AGENT_REF" \
-            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-          node scripts/windows-release.mjs verify "$RUNNER_TEMP/release-assets" "$VERSION"
+            "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" "$WINDOWS_ARCHES"
+          node scripts/windows-release.mjs verify "$RUNNER_TEMP/release-assets" "$VERSION" "$WINDOWS_ARCHES"
 
       - name: Publish only after byte-for-byte verification
         env:
