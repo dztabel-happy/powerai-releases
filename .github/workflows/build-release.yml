@@ -52,12 +52,13 @@ jobs:
         id: inputs
         env:
           VERSION: ${{ inputs.version }}
+          RELEASE_MODE: ${{ inputs.mode }}
           DESKTOP_REF: ${{ inputs.desktop_ref }}
           AGENT_REF: ${{ inputs.agent_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF_NAME" = main
+          test "$GITHUB_REF_NAME" = main || test "$RELEASE_MODE" = arm64-candidate
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           [[ "$DESKTOP_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$AGENT_REF" =~ ^[0-9a-f]{40}$ ]]
@@ -91,6 +92,19 @@ jobs:
     environment: release
     timeout-minutes: 150
     steps:
+      - name: Restrict ARM64 runner temporary directory permissions
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          # Windows OpenSSH rejects keys inheriting Authenticated Users access
+          # from the ARM runner's temporary directory. Restrict inheritance
+          # before checkout writes keys; keep only runner/SYSTEM/admin access.
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          icacls $env:RUNNER_TEMP /inheritance:r /grant:r "*${sid}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls $env:RUNNER_TEMP /remove:g '*S-1-5-11' '*S-1-5-32-545'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Checkout exact desktop source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
