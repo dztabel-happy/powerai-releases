@@ -13,8 +13,16 @@ fs.mkdirSync(root, { recursive: true });
 const cwd = path.join(root, 'workspace');
 fs.mkdirSync(cwd, { recursive: true });
 const env = { ...process.env, OFFICECLI_SKIP_UPDATE: '1' };
+const evidence = { passed: false, platform: process.platform, arch: process.arch, commands: [] };
+process.once('uncaughtException', (error) => {
+  fs.writeFileSync(path.join(root, 'evidence.json'), JSON.stringify({ ...evidence, error: error.message }, null, 2));
+  console.error(error);
+  process.exitCode = 1;
+});
 function run(file, args, options = {}) {
+  const started = Date.now();
   const result = spawnSync(file, args, { cwd, env, encoding: 'utf8', timeout: 180_000, windowsHide: true, ...options });
+  evidence.commands.push({ executable: path.basename(file), command: args[0], exitCode: result.status, elapsedMs: Date.now() - started });
   assert.equal(result.status, 0, `${path.basename(file)} failed: ${result.error?.message ?? ''}\n${result.stdout}\n${result.stderr}`);
   return result.stdout;
 }
@@ -63,5 +71,5 @@ fs.writeFileSync(path.join(cwd, 'figure.json'), JSON.stringify({
 run(chart, ['build', 'figure.json', '--out', 'chart', '--theme', 'business-cn', '--format', 'all']);
 const figures = fs.readdirSync(path.join(cwd, 'chart'), { recursive: true }).filter((name) => String(name).endsWith('.png'));
 assert.ok(figures.length > 0, 'ChartKit must actually render PNG output');
-fs.writeFileSync(path.join(root, 'evidence.json'), JSON.stringify({ passed: true, platform: process.platform, arch: process.arch, installed: true, agent: 'arm64', officecli: 'arm64', docxkit: 'x64-emulation', chartkit: 'x64-emulation', wordCreated: true, spreadsheetReadback: true, chartRendered: true }, null, 2));
+fs.writeFileSync(path.join(root, 'evidence.json'), JSON.stringify({ ...evidence, passed: true, installed: true, agent: 'arm64', officecli: 'arm64', docxkit: 'x64-emulation', chartkit: 'x64-emulation', wordCreated: true, spreadsheetReadback: true, chartRendered: true }, null, 2));
 console.log('Installed ARM64 app and native/compatibility document tools passed.');

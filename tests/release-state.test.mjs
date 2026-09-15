@@ -97,13 +97,14 @@ test("release workflows keep private source and credentials behind manual releas
     ]);
   assert.deepEqual(
     retentions.map(([line]) => line),
-    ["retention-days: 3", "retention-days: 3", "retention-days: 7", "retention-days: 3", "retention-days: 14"],
+    ["retention-days: 3", "retention-days: 3", "retention-days: 3", "retention-days: 7", "retention-days: 3", "retention-days: 14"],
   );
   assert.match(retentions[0][1], /name: spreadsheet-preview-budget-windows/);
   assert.match(retentions[1][1], /name: image-model-smoke-windows/);
-  assert.match(retentions[2][1], /name: titlebar-windows/);
-  assert.match(retentions[3][1], /name: failure-continuity-windows/);
-  assert.match(retentions[4][1], /name: macos-pending/);
+  assert.match(retentions[2][1], /name: arm64-install-evidence/);
+  assert.match(retentions[3][1], /name: titlebar-windows/);
+  assert.match(retentions[4][1], /name: failure-continuity-windows/);
+  assert.match(retentions[5][1], /name: macos-pending/);
   assert.match(
     build,
     /gh release create "\$tag" --repo "\$GITHUB_REPOSITORY" --draft/,
