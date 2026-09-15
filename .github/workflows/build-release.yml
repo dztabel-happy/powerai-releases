@@ -52,13 +52,12 @@ jobs:
         id: inputs
         env:
           VERSION: ${{ inputs.version }}
-          RELEASE_MODE: ${{ inputs.mode }}
           DESKTOP_REF: ${{ inputs.desktop_ref }}
           AGENT_REF: ${{ inputs.agent_ref }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          test "$GITHUB_REF_NAME" = main || test "$RELEASE_MODE" = arm64-candidate
+          test "$GITHUB_REF_NAME" = main
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
           [[ "$DESKTOP_REF" =~ ^[0-9a-f]{40}$ ]]
           [[ "$AGENT_REF" =~ ^[0-9a-f]{40}$ ]]
