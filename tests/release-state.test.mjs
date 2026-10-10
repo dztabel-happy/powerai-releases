@@ -15,28 +15,101 @@ function sha512(value) {
 }
 
 test("public update acceptance rejects unsafe dispatches and uploads only synthetic evidence", () => {
-  const workflow = fs.readFileSync(path.join(root, ".github/workflows/verify-desktop-update.yml"), "utf8");
+  const workflow = fs.readFileSync(
+    path.join(root, ".github/workflows/verify-desktop-update.yml"),
+    "utf8",
+  );
   assert.match(workflow, /workflow_dispatch:/);
-  assert.doesNotMatch(workflow, /pull_request:|push:|contents: write|gh release (?:create|upload|edit)/);
+  assert.doesNotMatch(
+    workflow,
+    /pull_request:|push:|contents: write|gh release (?:create|upload|edit)/,
+  );
   assert.match(workflow, /environment: release/);
   assert.match(workflow, /persist-credentials: false/);
   assert.match(workflow, /ref: \$\{\{ inputs.desktop_ref \}\}/);
   assert.match(workflow, /node tests\/manual\/auto-update\/validate-release.mjs/);
   assert.match(workflow, /node tests\/manual\/auto-update\/verify.mjs/);
-  const artifacts = workflow.split(/\n(?=      - )/).filter((step) => step.includes("actions/upload-artifact@"));
+  const artifacts = workflow
+    .split(/\n(?=      - )/)
+    .filter((step) => step.includes("actions/upload-artifact@"));
   assert.equal(artifacts.length, 1);
   assert.match(artifacts[0], /retention-days: 3/);
-  assert.match(artifacts[0], /path: \$\{\{ runner.temp \}\}\/update-acceptance-windows.json\s*$/);
+  assert.match(artifacts[0], /name: update-acceptance-windows-\$\{\{ inputs.arch \}\}-/);
+  assert.match(
+    artifacts[0],
+    /path: \|\n\s+\$\{\{ runner.temp \}\}\/update-acceptance-windows-\$\{\{ inputs.arch \}\}.json\n\s+\$\{\{ runner.temp \}\}\/update-acceptance-windows-\$\{\{ inputs.arch \}\}.json.diagnostics\/\s*$/,
+  );
+  assert.match(
+    workflow,
+    /arch:\n\s+description:[^\n]+\n\s+required: true\n\s+default: x64\n\s+type: choice\n\s+options:\n\s+- x64\n\s+- arm64/,
+  );
+  assert.match(
+    workflow,
+    /runs-on: \$\{\{ inputs.arch == 'arm64' && 'windows-11-arm' \|\| 'windows-2025' \}\}/,
+  );
+  assert.match(workflow, /TARGET_ARCH: \$\{\{ inputs.arch \}\}/);
+  assert.match(workflow, /PowerAI-\$\(\$env:FROM_VERSION\)-win-\$\(\$env:TARGET_ARCH\).exe/);
+  assert.doesNotMatch(workflow, /PowerAI-[^\n]*-win-x64.exe/);
+  assert.match(workflow, /"--arch=\$env:TARGET_ARCH"/);
+  assert.match(workflow, /"--channel-transition=\$env:CHANNEL_TRANSITION"/);
+  assert.ok(
+    workflow.indexOf("Restrict ARM64 runner temporary directory permissions") <
+      workflow.indexOf("Checkout exact private Desktop harness"),
+  );
 
-  const guard = workflow.match(/run: \|\n([\s\S]*?)\n      - name: Checkout/)[1]
-    .split("\n").map((line) => line.replace(/^          /, "")).join("\n");
-  const env = { ...process.env, GITHUB_REF_NAME: "main", DESKTOP_REF: "a".repeat(40), FROM_VERSION: "0.1.38", TO_VERSION: "0.1.39", TARGET_CHANNEL: "stable" };
-  const run = (overrides = {}) => execFileSync("bash", ["-c", guard], { env: { ...env, ...overrides }, stdio: "pipe" });
-  run();
-  run({ TARGET_CHANNEL: "dev" });
-  run({ TARGET_CHANNEL: "dev", TO_VERSION: "0.1.39-dev.24" });
-  for (const overrides of [{ GITHUB_REF_NAME: "other" }, { DESKTOP_REF: "main" }, { FROM_VERSION: "../source" }, { TO_VERSION: "0.1.39; false" }, { TARGET_CHANNEL: "other" }]) {
-    assert.throws(() => run(overrides));
+  const guardStep = workflow
+    .split(/\n(?=      - )/)
+    .find((step) => step.includes("- name: Validate dispatch inputs"));
+  const guard = guardStep
+    .match(/run: \|\n([\s\S]*)/)[1]
+    .split("\n")
+    .map((line) => line.replace(/^          /, ""))
+    .join("\n");
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "powerai-update-dispatch-"));
+  const output = path.join(directory, "environment");
+  const env = {
+    ...process.env,
+    GITHUB_ENV: output,
+    GITHUB_REF_NAME: "main",
+    DESKTOP_REF: "a".repeat(40),
+    FROM_VERSION: "0.1.38",
+    TO_VERSION: "0.1.39",
+    TARGET_CHANNEL: "stable",
+    TARGET_ARCH: "x64",
+  };
+  const run = (overrides = {}) => {
+    fs.writeFileSync(output, "");
+    execFileSync("bash", ["-c", guard], { env: { ...env, ...overrides }, stdio: "pipe" });
+    return fs.readFileSync(output, "utf8");
+  };
+  try {
+    assert.match(run(), /CHANNEL_TRANSITION=none/);
+    assert.match(
+      run({ TARGET_CHANNEL: "dev", TO_VERSION: "0.1.39-dev.24" }),
+      /CHANNEL_TRANSITION=stable-to-dev/,
+    );
+    assert.match(
+      run({
+        TARGET_CHANNEL: "dev",
+        TARGET_ARCH: "arm64",
+        FROM_VERSION: "0.1.40-dev.2",
+        TO_VERSION: "0.1.40-dev.3",
+      }),
+      /CHANNEL_TRANSITION=none/,
+    );
+    for (const overrides of [
+      { GITHUB_REF_NAME: "other" },
+      { DESKTOP_REF: "main" },
+      { FROM_VERSION: "../source" },
+      { TO_VERSION: "0.1.39; false" },
+      { TARGET_CHANNEL: "other" },
+      { TARGET_ARCH: "aarch64" },
+      { TARGET_ARCH: "x64; false" },
+    ]) {
+      assert.throws(() => run(overrides), JSON.stringify(overrides));
+    }
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
   }
 });
 
