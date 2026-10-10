@@ -98,6 +98,8 @@ test("a replaced asset of a different size changes the fingerprint", () => {
 
 const installer = (version, arch = "x64") => `PowerAI-${version}-win-${arch}.exe`;
 const blockmap = (version, arch) => `${installer(version, arch)}.blockmap`;
+const armProvenance = "release-provenance-win-arm64.json";
+const sha512 = (body) => crypto.createHash("sha512").update(body).digest("base64");
 const sha256 = (body) => crypto.createHash("sha256").update(body).digest("hex");
 
 async function fixture(t) {
@@ -134,8 +136,26 @@ async function fixture(t) {
         [blockmap(version, arch), `blocks ${version} ${arch}`],
       ]),
     ]);
+    if (arches.includes("arm64")) {
+      const zip = `PowerAI-${version}-win-arm64.zip`;
+      const body = `zip ${version} arm64`;
+      contents.set(zip, body);
+      contents.set(
+        "latest-win-arm64.yml",
+        `version: ${version}\nfiles:\n  - url: ${installer(version, "arm64")}\n    sha512: ${sha512(contents.get(installer(version, "arm64")))}\n    size: ${Buffer.byteLength(contents.get(installer(version, "arm64")))}\npath: ${installer(version, "arm64")}\n`,
+      );
+      contents.set(
+        "powerai-staged-update-arm64.json",
+        JSON.stringify({
+          schemaVersion: 1,
+          version,
+          zip: { name: zip, sha512: sha512(body), size: Buffer.byteLength(body) },
+        }),
+      );
+    }
     const update = () => {
       const provenance = JSON.stringify({
+        version,
         assets: Object.fromEntries([...contents].map(([name, body]) => [name, sha256(body)])),
       });
       release.assets = [...contents, ["release-provenance.json", provenance]].map(
@@ -375,5 +395,219 @@ test("a previous verified channel survives an interrupted directory swap", async
   assert.equal(
     f.requests.some((url) => url.endsWith(".exe")),
     false,
+  );
+});
+
+test("ARM feed survives consecutive x64-only releases and catalog eviction, then advances to a complete ARM release", async (t) => {
+  const f = await fixture(t);
+  f.publish("1.0.0");
+  const arm = f.publish("1.1.0-dev.1", ["x64", "arm64"]);
+  assert.equal((await f.run()).code, 0);
+  const original = f.bodies.get("/assets/1.1.0-dev.1/release-provenance.json");
+  f.requests.length = 0;
+  for (const version of ["1.1.0-dev.2", "1.1.0-dev.3"]) {
+    f.publish(version);
+    assert.equal((await f.run()).code, 0);
+    assert.equal(
+      await (await fetch(`${f.base}/mirror/dev/latest-win-arm64.yml`)).text(),
+      arm.contents.get("latest-win-arm64.yml"),
+    );
+    assert.equal(fs.readFileSync(path.join(f.dest, "dev", armProvenance), "utf8"), original);
+    assert.equal(
+      JSON.parse(fs.readFileSync(path.join(f.dest, "dev", "release-provenance.json"))).version,
+      version,
+    );
+  }
+  f.releases.splice(f.releases.indexOf(arm.release), 1);
+  for (const url of f.bodies.keys())
+    if (url.startsWith("/assets/1.1.0-dev.1/")) f.bodies.delete(url);
+  f.publish("1.1.0-dev.4");
+  assert.equal((await f.run()).code, 0, "verified local ARM feed must survive outside the catalog");
+  for (const name of [
+    installer("1.1.0-dev.1", "arm64"),
+    blockmap("1.1.0-dev.1", "arm64"),
+    "PowerAI-1.1.0-dev.1-win-arm64.zip",
+    "latest-win-arm64.yml",
+    "powerai-staged-update-arm64.json",
+  ]) {
+    assert.equal(
+      await (await fetch(`${f.base}/mirror/dev/${name}`)).text(),
+      arm.contents.get(name),
+    );
+  }
+  f.requests.length = 0;
+  assert.equal((await f.run()).code, 0);
+  assert.deepEqual(
+    f.requests.filter(
+      (url) => url.startsWith("/assets/") && !url.endsWith("release-provenance.json"),
+    ),
+    [],
+  );
+  const next = f.publish("1.1.0-dev.5", ["x64", "arm64"]);
+  assert.equal((await f.run()).code, 0);
+  assert.equal(
+    fs.readFileSync(path.join(f.dest, "dev", "latest-win-arm64.yml"), "utf8"),
+    next.contents.get("latest-win-arm64.yml"),
+  );
+  assert.equal(fs.existsSync(path.join(f.dest, "dev", installer("1.1.0-dev.1", "arm64"))), false);
+  assert.equal(fs.existsSync(path.join(f.dest, "dev", "PowerAI-1.1.0-dev.1-win-arm64.zip")), false);
+});
+
+test("stable retains only stable ARM feeds while dev may retain a newer prerelease", async (t) => {
+  const f = await fixture(t);
+  const stable = f.publish("1.0.0", ["x64", "arm64"]);
+  const dev = f.publish("1.1.0-dev.1", ["x64", "arm64"]);
+  assert.equal((await f.run()).code, 0);
+  f.publish("1.0.1");
+  f.publish("1.1.0-dev.2");
+  assert.equal((await f.run()).code, 0);
+  for (const [channel, source] of [
+    ["latest", stable],
+    ["dev", dev],
+  ]) {
+    assert.equal(
+      fs.readFileSync(path.join(f.dest, channel, "latest-win-arm64.yml"), "utf8"),
+      source.contents.get("latest-win-arm64.yml"),
+    );
+  }
+});
+
+for (const fault of [
+  "missing member",
+  "bad digest",
+  "missing HTTP file",
+  "wrong YAML reference",
+  "wrong YAML digest",
+  "wrong YAML size",
+  "wrong top-level YAML digest",
+  "wrong staged ZIP digest",
+]) {
+  test(`invalid new ARM publication (${fault}) leaves the prior complete channel intact`, async (t) => {
+    const f = await fixture(t);
+    f.publish("1.0.0");
+    f.publish("1.1.0-dev.1", ["x64", "arm64"]);
+    assert.equal((await f.run()).code, 0);
+    const snapshot = Object.fromEntries(
+      fs
+        .readdirSync(path.join(f.dest, "dev"))
+        .map((name) => [name, fs.readFileSync(path.join(f.dest, "dev", name))]),
+    );
+    const next = f.publish("1.1.0-dev.2", ["x64", "arm64"]);
+    if (fault === "missing member") next.contents.delete("PowerAI-1.1.0-dev.2-win-arm64.zip");
+    if (fault === "wrong YAML reference")
+      next.contents.set(
+        "latest-win-arm64.yml",
+        next.contents
+          .get("latest-win-arm64.yml")
+          .replace(
+            "- url: PowerAI-1.1.0-dev.2-win-arm64.exe",
+            "- url: PowerAI-1.1.0-dev.2-win-x64.exe",
+          ),
+      );
+    if (fault === "wrong YAML digest")
+      next.contents.set(
+        "latest-win-arm64.yml",
+        next.contents
+          .get("latest-win-arm64.yml")
+          .replace(/sha512: .+/, `sha512: ${sha512("different EXE")}`),
+      );
+    if (fault === "wrong YAML size")
+      next.contents.set(
+        "latest-win-arm64.yml",
+        next.contents.get("latest-win-arm64.yml").replace(/size: \d+/, "size: 123"),
+      );
+    if (fault === "wrong top-level YAML digest")
+      next.contents.set(
+        "latest-win-arm64.yml",
+        next.contents.get("latest-win-arm64.yml") + `sha512: ${sha512("different EXE")}\n`,
+      );
+    if (fault === "wrong staged ZIP digest") {
+      const manifest = JSON.parse(next.contents.get("powerai-staged-update-arm64.json"));
+      manifest.zip.sha512 = sha512("different ZIP");
+      next.contents.set("powerai-staged-update-arm64.json", JSON.stringify(manifest));
+    }
+    next.update();
+    if (fault === "bad digest")
+      f.bodies.set("/assets/1.1.0-dev.2/PowerAI-1.1.0-dev.2-win-arm64.exe", "corrupt");
+    if (fault === "missing HTTP file")
+      f.bodies.delete("/assets/1.1.0-dev.2/PowerAI-1.1.0-dev.2-win-arm64.zip");
+    assert.notEqual((await f.run()).code, 0);
+    assert.deepEqual(
+      Object.fromEntries(
+        fs
+          .readdirSync(path.join(f.dest, "dev"))
+          .map((name) => [name, fs.readFileSync(path.join(f.dest, "dev", name))]),
+      ),
+      snapshot,
+    );
+    assert.equal(
+      fs.readdirSync(f.dest).some((name) => name.startsWith(".staging-")),
+      false,
+    );
+  });
+}
+
+for (const fault of ["unanchored provenance", "missing ZIP", "corrupt installer"]) {
+  test(`catalog-evicted ARM source rejects ${fault} without replacing the channel`, async (t) => {
+    const f = await fixture(t);
+    f.publish("1.0.0");
+    const arm = f.publish("1.1.0-dev.1", ["x64", "arm64"]);
+    assert.equal((await f.run()).code, 0);
+    f.publish("1.1.0-dev.2");
+    assert.equal((await f.run()).code, 0);
+    const before = fs.readFileSync(path.join(f.dest, "dev", ".fingerprint"), "utf8");
+    f.releases.splice(f.releases.indexOf(arm.release), 1);
+    if (fault === "unanchored provenance")
+      fs.appendFileSync(path.join(f.dest, "dev", armProvenance), "\n");
+    if (fault === "missing ZIP")
+      fs.rmSync(path.join(f.dest, "dev", "PowerAI-1.1.0-dev.1-win-arm64.zip"));
+    if (fault === "corrupt installer")
+      fs.writeFileSync(path.join(f.dest, "dev", installer("1.1.0-dev.1", "arm64")), "broken");
+    f.publish("1.1.0-dev.3");
+    assert.notEqual((await f.run()).code, 0);
+    assert.equal(fs.readFileSync(path.join(f.dest, "dev", ".tag"), "utf8"), "v1.1.0-dev.2");
+    assert.equal(fs.readFileSync(path.join(f.dest, "dev", ".fingerprint"), "utf8"), before);
+  });
+}
+
+test("a channel created by the prior mirror can retain its anchored ARM source after catalog eviction", async (t) => {
+  const f = await fixture(t);
+  f.publish("1.0.0");
+  const arm = f.publish("1.1.0-dev.1", ["x64", "arm64"]);
+  assert.equal((await f.run()).code, 0);
+  fs.rmSync(path.join(f.dest, "dev", armProvenance));
+  const marker = path.join(f.dest, "dev", ".fingerprint");
+  fs.writeFileSync(
+    marker,
+    fs
+      .readFileSync(marker, "utf8")
+      .replace(/\nretained-arm64-v1[\s\S]*?(?=\nretained-blockmaps-v1)/, ""),
+  );
+  f.releases.splice(f.releases.indexOf(arm.release), 1);
+  f.publish("1.1.0-dev.2");
+  f.requests.length = 0;
+  assert.equal((await f.run()).code, 0);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(f.dest, "dev", armProvenance))).version,
+    "1.1.0-dev.1",
+  );
+  assert.equal(
+    f.requests.some((url) => url.startsWith("/assets/1.1.0-dev.1/")),
+    false,
+  );
+});
+
+test("a stable channel without any stable ARM publication never copies a dev ARM feed", async (t) => {
+  const f = await fixture(t);
+  f.publish("1.0.0");
+  f.publish("1.1.0-dev.1", ["x64", "arm64"]);
+  assert.equal((await f.run()).code, 0);
+  f.publish("1.1.0");
+  assert.equal((await f.run()).code, 0);
+  assert.equal(fs.existsSync(path.join(f.dest, "latest", "latest-win-arm64.yml")), false);
+  assert.equal(fs.existsSync(path.join(f.dest, "latest", armProvenance)), false);
+  assert.equal(
+    JSON.parse(fs.readFileSync(path.join(f.dest, "dev", armProvenance))).version,
+    "1.1.0-dev.1",
   );
 });
