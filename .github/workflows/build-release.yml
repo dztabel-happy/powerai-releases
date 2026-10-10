@@ -29,9 +29,10 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
-  group: powerai-release-${{ inputs.version }}
+  group: ${{ inputs.mode == 'arm64-candidate' && format('powerai-candidate-{0}', inputs.version) || 'powerai-release-publish' }}
   cancel-in-progress: false
 
 env:
@@ -40,10 +41,15 @@ env:
 jobs:
   guard:
     name: Validate immutable release inputs
+    permissions:
+      contents: read
+      actions: read
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       version: ${{ steps.inputs.outputs.version }}
+      channel: ${{ steps.plan.outputs.channel }}
+      windows_matrix: ${{ steps.plan.outputs.windows_matrix }}
     steps:
       - name: Checkout release contract
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
@@ -70,6 +76,30 @@ jobs:
           [[ "$previous_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
           node -e "const a=process.argv[1].split(/[.-]/).slice(0,3).map(Number); const b=process.argv[2].slice(1).split('.').map(Number); if(!a.some((value,index)=>value!==b[index]&&value>b[index]&&a.slice(0,index).every((part,i)=>part===b[i]))) process.exit(1)" "$VERSION" "$previous_tag"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+
+      - name: Freeze release and upgrade baselines
+        if: inputs.mode != 'arm64-candidate'
+        id: plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+          WINDOWS_ARM64: ${{ inputs.windows_arm64 }}
+        run: |
+          node scripts/release-readiness.mjs prepare --version "$VERSION" \
+            --desktop-ref "$DESKTOP_REF" --agent-ref "$AGENT_REF" \
+            --windows-arm64 "$WINDOWS_ARM64" --output release-plan.json
+
+      - name: Retain immutable release plan
+        if: inputs.mode != 'arm64-candidate'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-plan
+          path: release-plan.json
+          if-no-files-found: error
+          retention-days: 90
 
   approve:
     name: Approve immutable release
@@ -121,6 +151,11 @@ jobs:
           ssh-key: ${{ secrets.POWERAI_AGENT_DEPLOY_KEY }}
           path: powerai-agent
           fetch-depth: 1
+
+      - name: Checkout release acceptance tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: release-tools
 
       - name: Validate immutable source commits
         shell: bash
@@ -198,7 +233,7 @@ jobs:
         with:
           name: spreadsheet-preview-budget-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 90
           path: ${{ runner.temp }}/spreadsheet-preview-budget-windows${{ matrix.evidence_suffix }}/
 
       - name: Check real model image credentials
@@ -215,6 +250,7 @@ jobs:
             Write-Host "::warning::SKIPPED: $reason"
             "Image model smoke: SKIPPED — $reason" >> $env:GITHUB_STEP_SUMMARY
             @{ status = 'skipped'; passed = $false; reason = $reason } | ConvertTo-Json | Set-Content (Join-Path $evidenceDir 'evidence.json')
+            throw $reason
           } else {
             'available=true' >> $env:GITHUB_OUTPUT
           }
@@ -239,7 +275,7 @@ jobs:
         with:
           name: image-model-smoke-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 90
           path: |
             ${{ runner.temp }}/image-model-smoke-windows${{ matrix.evidence_suffix }}/evidence.json
             ${{ runner.temp }}/image-model-smoke-windows${{ matrix.evidence_suffix }}/config.json
@@ -275,6 +311,7 @@ jobs:
             Write-Host "::warning::SKIPPED: $reason"
             "Failure continuity: SKIPPED — $reason" >> $env:GITHUB_STEP_SUMMARY
             @{ status = 'skipped'; passed = $false; reason = $reason } | ConvertTo-Json | Set-Content (Join-Path $evidenceDir 'matrix.json')
+            throw $reason
           } else {
             'available=true' >> $env:GITHUB_OUTPUT
           }
@@ -304,7 +341,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: arm64-install-evidence
-          retention-days: 3
+          retention-days: 90
           if-no-files-found: warn
           path: ${{ runner.temp }}/arm64-install/evidence.json
 
@@ -336,7 +373,7 @@ jobs:
         with:
           name: titlebar-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
-          retention-days: 7
+          retention-days: 90
           path: ${{ runner.temp }}/titlebar-windows${{ matrix.evidence_suffix }}/
 
       - name: Verify packaged failure continuity
@@ -375,12 +412,28 @@ jobs:
       - name: Retain failure continuity evidence
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
-        continue-on-error: true
         with:
           name: failure-continuity-windows${{ matrix.evidence_suffix }}
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 90
           path: ${{ runner.temp }}/failure-continuity-windows${{ matrix.evidence_suffix }}/
+
+      - name: Require complete packaged acceptance evidence
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.guard.outputs.version }}
+          TARGET_ARCH: ${{ matrix.arch }}
+        run: |
+          node release-tools/scripts/verify-build-acceptance.mjs "$env:RUNNER_TEMP" "$env:VERSION" "$env:TARGET_ARCH" "$env:RUNNER_TEMP/build-acceptance.json"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Retain packaged acceptance result
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: build-acceptance-${{ matrix.arch }}
+          path: ${{ runner.temp }}/build-acceptance.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Retain Windows artifacts
         # A failed isolated candidate must remain inspectable without rebuilding.
@@ -401,7 +454,7 @@ jobs:
     if: inputs.mode != 'arm64-candidate'
     name: Build and submit macOS arm64
     needs: [guard, approve]
-    runs-on: macos-14
+    runs-on: macos-15
     environment: release
     timeout-minutes: 90
     steps:
@@ -533,6 +586,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      actions: write
     timeout-minutes: 10
     steps:
       - name: Download notarization state
@@ -552,6 +606,9 @@ jobs:
         run: |
           set -euo pipefail
           gh release upload "v$VERSION" --repo "$GITHUB_REPOSITORY" pending/notary-state.json --clobber
+          # GITHUB_TOKEN release events do not recursively start workflows.
+          # Dispatch this exact version; the existing cron remains the retry path.
+          gh workflow run finalize-notarization.yml --repo "$GITHUB_REPOSITORY" --ref main -f version="$VERSION"
 
   publish-windows:
     if: inputs.mode != 'arm64-candidate'
@@ -626,3 +683,104 @@ jobs:
             gh release edit "$tag" --repo "$GITHUB_REPOSITORY" --draft=false --latest
           fi
           release_created=false
+
+  windows-mirror-ready:
+    name: Wait for verified Windows mirror
+    needs: [guard, publish-windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-plan
+      - name: Wait for this run's published bundle and mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-readiness.mjs wait --plan release-plan.json --phase windows --output windows-readiness.json --timeout-seconds 2100
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-mirror-readiness
+          path: windows-readiness.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  installed-windows:
+    name: Accept installed Windows ${{ matrix.arch }} update
+    needs: [guard, windows-mirror-ready]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.guard.outputs.windows_matrix) }}
+    uses: ./.github/workflows/verify-desktop-update.yml
+    with:
+      from_version: ${{ matrix.from_version }}
+      to_version: ${{ inputs.version }}
+      desktop_ref: ${{ inputs.desktop_ref }}
+      arch: ${{ matrix.arch }}
+      target_channel: ${{ needs.guard.outputs.channel }}
+      require_windows_signature: false
+    secrets: inherit
+
+  complete-mirror-ready:
+    name: Wait for notarization and complete mirror
+    needs: [guard, mark-macos-pending]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 95
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: release-plan
+      - name: Wait for all official assets and their public mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/release-readiness.mjs wait --plan release-plan.json --phase complete --output complete-readiness.json --timeout-seconds 5400
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: complete-mirror-readiness
+          path: complete-readiness.json
+          if-no-files-found: warn
+          retention-days: 90
+
+  official-macos:
+    name: Accept the official Mac package
+    needs: complete-mirror-ready
+    uses: ./.github/workflows/verify-macos-release.yml
+    with:
+      version: ${{ inputs.version }}
+      desktop_ref: ${{ inputs.desktop_ref }}
+      agent_ref: ${{ inputs.agent_ref }}
+    secrets: inherit
+
+  release-result:
+    name: Report complete release acceptance
+    if: always() && inputs.mode != 'arm64-candidate'
+    needs: [guard, approve, windows-x64, macos-arm64, publish-windows, mark-macos-pending, windows-mirror-ready, installed-windows, complete-mirror-ready, official-macos]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Download this run's compact acceptance records
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: '{release-plan,build-acceptance-*,*-mirror-readiness,update-acceptance-windows-*,macos-official-acceptance-*}'
+          path: acceptance
+      - name: Aggregate actual release results
+        if: always()
+        env:
+          RELEASE_NEEDS: ${{ toJSON(needs) }}
+          VERSION: ${{ inputs.version }}
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+          WINDOWS_ARM64: ${{ inputs.windows_arm64 }}
+        run: node scripts/release-result.mjs acceptance release-result.json
+      - name: Retain final release report
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: release-result-${{ inputs.version }}
+          path: release-result.json
+          if-no-files-found: error
+          retention-days: 90

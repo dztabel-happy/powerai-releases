@@ -21,8 +21,7 @@
 
 当前发布通道提供 Windows x64 与 macOS arm64。Windows 安装包暂不签名，Release 说明必须明确标注；macOS 用 Developer ID 签名并经 Apple 公证。
 
-两条产线**互不阻塞**：Windows 构建完立即发布；macOS 提交 Apple 后不等待，由
-`finalize-notarization` 轮询，公证通过后把 macOS 制品追加到同一个 Release。
+Windows 构建完立即发布；macOS 提交 Apple 后交给 `finalize-notarization`，公证通过后把 macOS 制品追加到同一个 Release。主工作流继续等待完整镜像与两平台验收，只有实际通过才报告整版完成。Mac 排队不阻止 Windows 制品先行可用。
 Apple 排队时间不可预测，让发布等它是 2026-08 之前 macOS 停滞的直接原因。
 
 macOS 仅提供 arm64（Apple Silicon）。Intel 机型不在当前发布范围内。
@@ -65,7 +64,7 @@ macOS（公证通过后追加到同一个 Release）：
 
 1. 与 Windows 同一次运行、同一组提交，签名后提交 Apple，**不等待结果**。
 2. 已发布的 Release 上挂 `notary-state.json` 作为待办标记。
-3. `finalize-notarization` 轮询；Apple 判定 Accepted 后 staple、重建 dmg/zip。
+3. 上传待办标记后自动派发该版本的 `finalize-notarization`；每半小时的定时轮询保留为重试。Apple 判定 Accepted 后 staple、重建 dmg/zip。
 4. 只校验并**追加** macOS 制品与 `latest-arm64-mac.yml`/`latest-mac.yml`，
    逐字节核对。**不得重传 Windows 制品**（它们已在公开下载中），
    **不得重设 Release 的 latest 指针**（该指针属于发布它的那条产线；在这里重设
@@ -86,7 +85,26 @@ macOS（公证通过后追加到同一个 Release）：
 
 ## 6. 发布验收
 
-安装态升级验收统一从本仓库触发，私有 `powerai-desktop` 不保留重复的 Actions 入口：
+### 自动串联
+
+只需派发一次 `build-release.yml` 并完成既有的 `release-approval` 审批。无需人工继续派发公证、升级验收或手工同步 VPS：
+
+1. 构建前冻结本次版本、两仓源码提交、发布工具提交、运行编号及可用的旧版本。升级起点按所选架构选取较早的同通道公开版本；缺少完整来源则提前失败。
+2. Windows 构建必须完成表格预览、真实模型图片、标题栏、23 项故障连续性验收。缺少凭据、脚本、结果或跳过必需验收均阻止发布。
+3. Windows 发布后等待 VPS 定时镜像到达本次来源清单，再自动调用安装态升级验收。旧安装包必须先通过原始发布来源清单的 SHA-256 核对。
+4. 自动派发公证收尾，同时等待五个 Mac 制品、来源清单和公共镜像一致，且待办标记已移除。公证工作流的绿色空跑不代表制品完成。
+5. 在 macOS runner 下载正式发布包，验证清单、签名、公证、装订、Gatekeeper 和包内 Agent 来源，再对原包运行表格预览、提前切换/关闭、保存、重新打开和外部重载验收；运行前后验证原包关键文件未改变。
+6. 主工作流依据各阶段状态及真实验收 JSON 汇总结果。缺失、失败、跳过、版本或源码不一致均报告 `NOT ACCEPTED`。报告、来源计划及验收证据保留 90 天。
+
+同一时间只允许一条发布链运行，防止较新版本改变正在验收的通道；架构候选验证使用独立并发组。Windows 镜像等待上限 35 分钟，完整公证/镜像等待上限 90 分钟。超过时限会明确失败，公证定时任务仍会继续；待外部故障消除后可重跑失败作业，不覆盖或重复发布已有制品。
+
+总结果显示在原始 Build 工作流和 Job Summary 中，沿用 GitHub Actions 的工作流通知。是否收到邮件或网页通知取决于账户的 Actions 通知设置；流水线不另行发送 Slack 或邮件。正常运行无需盯守，失败会留下可定位的阶段和原始证据。
+
+Mac 构建、公证与正式包验收使用 `macos-15`；`macos-14` 将于 2026-11-02 退役，2026-10-12 起安排间歇停机，见 [GitHub runner 公告](https://github.com/actions/runner-images/issues/13518)。
+
+### 独立复核
+
+安装态升级验收也保留本仓库的手工入口，私有 `powerai-desktop` 不保留重复的 Actions 入口：
 
 ```bash
 gh workflow run verify-desktop-update.yml --repo dztabel-happy/powerai-releases --ref main \
@@ -97,12 +115,12 @@ gh workflow run verify-desktop-update.yml --repo dztabel-happy/powerai-releases 
 
 `desktop_ref` 固定验收脚本版本，与安装包自身的来源清单分别记录。测试脚本保留在私有源码仓库，通过现有 `release` environment 的只读密钥读取；不上传源码目录或用户真实数据。
 
-dev 验收选择 `target_channel=dev`：从已安装正式版进入关于页，打开预发布开关并在不重启应用的情况下更新。目标必须是该通道当前最高的公开版本；正式版比 dev 新时，dev 通道指向正式版，验收仍应成立。`require_windows_signature` 只控制来源安装包及旧程序的 Authenticode 检查，与工作流所在仓库是否公开无关。
+dev 验收选择 `target_channel=dev`：从冻结的旧安装版进入关于页，必要时打开预发布开关后更新；自动串联默认选择较早的 dev，独立入口也可验证正式版进入 dev。目标必须是该通道当前最高的公开版本；正式版比 dev 新时，dev 通道指向正式版，验收仍应成立。`require_windows_signature` 只控制来源安装包及旧程序的 Authenticode 检查，与工作流所在仓库是否公开无关。
 
-升级结果同时写入日志、Job Summary 和仅包含验收 JSON 的 artifact（3 天）。上传步骤保持独立，不能用上传失败掩盖功能判据，也不能把功能失败改报通过。升级和 swap helper 等验收仍可独立手动运行，不重复构建或覆盖已发布安装包。
+升级结果同时写入日志、Job Summary 和包含原始验收 JSON、来源校验及诊断的 artifact（90 天）。上传步骤保持独立，不能用上传失败掩盖功能判据，也不能把功能失败改报通过。升级和 swap helper 等验收仍可独立手动运行，不重复构建或覆盖已发布安装包。
 
-此工作流在 Windows runner 上使用隔离的合成测试配置，检查版本升级、测试标记保留、
-文档转换和窗口安全区。它不替代真实账号、完整历史库迁移、手机 relay 或 macOS 安装态升级验收。
+此工作流在 Windows runner 上使用隔离的合成测试配置，采用 controlled relaunch，检查版本升级、测试标记保留、
+文档转换和窗口安全区。它不替代首次自动重启、真实账号、完整历史库迁移、手机 relay 或 macOS 安装态升级验收；原始 route=unknown 也不得改写成已经证明了某条升级路径。
 
 内测版本发布后，在真实 Windows 机器上使用已经安装的旧版本验证：
 
@@ -128,20 +146,7 @@ macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep
 文件的 sha512 与 Release 中的制品逐字节一致。该记录未覆盖实际安装和新版启动，
 不能作为完整旧版→新版升级通过的证据；涉及更新链路改动时应另行记录安装态结果。
 
-后续每个引入 macOS 制品的版本按成本分级复核（2026-09-01 起，v0.1.38-dev.2
-实测后修订——那次按旧要求下了 700MB 制品本地验签，四项全过但全是重复劳动）：
-
-- **dev 版（默认）**：只做免费的**尺寸核对**——GitHub API 的 asset size 必须
-  等于 `latest-mac.yml` / `latest-arm64-mac.yml` 声明的 size，dmg 与 zip 都核。
-  这是制品与元数据的一致性快速检查，可以发现装订后未刷新元数据等尺寸不一致问题，
-  不代替摘要校验或安装运行验证。签名/公证/装订/`spctl` 四项和上传后摘要核对由
-  `finalize-notarization` 在 CI 里执行；常规 dev 不必重复下载整包验签。
-  签名、打包或更新链路有改动时，补充对应平台实测并记录验证边界。
-- **正式版、或任一尺寸对不上时**：完整下载制品，本地复核四件套
-  （`codesign --verify --deep --strict`、Authority 为 Developer ID、
-  `spctl --assess` 放行、zip sha512 与清单逐字节一致），并核对
-  `CodeResources` 开头的 `s8ch` 装订魔数（`stapler validate` 恒联网查询，
-  不能当离线证据）。
+每个引入 macOS 制品的自动发布现在均在 CI 上下载正式包验签并运行表格验收，替代此前 dev 版只做尺寸核对的惯例。它覆盖真实包运行，不代表 Mac 安装态自动升级、真实模型对话或任意 OOXML 内容逐字节保真；涉及这些能力时另行补充对应实测。
 
 ## 7. 回滚
 
@@ -152,7 +157,7 @@ macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep
 - GitHub Release 中的安装包、更新元数据和来源证明是发布记录，不自动删除。
 - GitHub Actions 构建中间产物保留 1 天，只用于同一次工作流内传递。唯一例外是
   待公证的 macOS 签名包（`macos-pending`，保留 14 天）：它要跨工作流交给
-  `finalize-notarization`，且必须活过 Apple 的排队时间。诊断证据保留 3 天；需要逐图复核的工作簿保真和标题栏截图证据保留 7 天。
+  `finalize-notarization`，且必须活过 Apple 的排队时间。本自动发布链的来源计划、验收结果、诊断和截图证据保留 90 天。
 - 清理 Actions 中间产物不得删除 Release 资产，也不得改变已发布版本。
 
 ## Windows ARM64 (optional architecture)
@@ -179,3 +184,9 @@ already copies and verifies these assets without architecture-specific logic.
 `windows-release.mjs prepare|provenance|verify` takes an optional final target
 argument: `x64` (the unchanged default), `arm64`, or `all`. Candidate verification
 is not a production capacity, physical laptop, or long-running task claim.
+
+## VPS 镜像与备份
+
+VPS 的定时任务每 10 分钟同步公开 Release。`latest/` 保留当前正式版，`dev/` 保留当前 dev；更新采用校验后原子替换。为增量升级保留必要的历史 blockmap。未发布 Windows ARM64 时保留它上一次真实发布的五个文件和原始来源清单；`hold/` 是独立保留目录，不随发布清理。
+
+镜像脚本的 `.previous-*` 仅用于原子交换回滚，成功后自动清理，不会每次发版积累一整份备份。`/var/backups/powerai-mirror-*` 是维护脚本时人工创建的事故恢复快照，不属于日常发布流程；端到端验收通过并保存小型维护记录后，才删除明确指定的旧快照。快照使用硬链接，禁止改写或 chmod 链接中的制品；删除只解除备份目录引用。

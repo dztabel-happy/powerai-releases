@@ -33,11 +33,11 @@ test("public update acceptance rejects unsafe dispatches and uploads only synthe
     .split(/\n(?=      - )/)
     .filter((step) => step.includes("actions/upload-artifact@"));
   assert.equal(artifacts.length, 1);
-  assert.match(artifacts[0], /retention-days: 3/);
+  assert.match(artifacts[0], /retention-days: 90/);
   assert.match(artifacts[0], /name: update-acceptance-windows-\$\{\{ inputs.arch \}\}-/);
   assert.match(
     artifacts[0],
-    /path: \|\n\s+\$\{\{ runner.temp \}\}\/update-acceptance-windows-\$\{\{ inputs.arch \}\}.json\n\s+\$\{\{ runner.temp \}\}\/update-acceptance-windows-\$\{\{ inputs.arch \}\}.json.diagnostics\/\s*$/,
+    /path: \|\n\s+\$\{\{ runner.temp \}\}\/update-acceptance-windows-\$\{\{ inputs.arch \}\}.json\n\s+\$\{\{ runner.temp \}\}\/update-acceptance-windows-\$\{\{ inputs.arch \}\}.json.diagnostics\/\n\s+\$\{\{ runner.temp \}\}\/installed-update-summary.json\n\s+\$\{\{ runner.temp \}\}\/source-installer-integrity.json\n\s+\$\{\{ runner.temp \}\}\/download\/release-provenance.json\s*$/,
   );
   assert.match(
     workflow,
@@ -156,28 +156,25 @@ test("release workflows keep private source and credentials behind manual releas
   assert.match(build, /PowerAI-\$\{\{ needs\.guard\.outputs\.version \}\}-win-\$\{\{ matrix.arch \}\}\.zip/);
   assert.match(build, /tests\/manual\/spreadsheet-preview-budget\/verify\.ts/);
   assert.match(build, /spreadsheet-preview-budget-windows/);
-  // Build intermediates stay short-lived: only diagnosis evidence (3/7 days)
-  // and the signed macOS app awaiting notarization (14 days) outlive their
-  // run. The macOS exception is load-bearing — Apple's queue is unbounded,
-  // and the finalizer fetches that artifact once the answer arrives.
-  const retentions = build
-    .split("\n")
-    .map((line, index) => [line, index])
-    .filter(([line]) => /retention-days: (?:[2-9]|[1-9][0-9]+)/.test(line))
-    .map(([line, index]) => [
-      line.trim(),
-      build.split("\n").slice(Math.max(0, index - 6), index + 1).join("\n"),
-    ]);
-  assert.deepEqual(
-    retentions.map(([line]) => line),
-    ["retention-days: 3", "retention-days: 3", "retention-days: 3", "retention-days: 7", "retention-days: 3", "retention-days: 14"],
-  );
-  assert.match(retentions[0][1], /name: spreadsheet-preview-budget-windows/);
-  assert.match(retentions[1][1], /name: image-model-smoke-windows/);
-  assert.match(retentions[2][1], /name: arm64-install-evidence/);
-  assert.match(retentions[3][1], /name: titlebar-windows/);
-  assert.match(retentions[4][1], /name: failure-continuity-windows/);
-  assert.match(retentions[5][1], /name: macos-pending/);
+  // Published acceptance records outlive build intermediates. The signed app
+  // awaiting Apple's answer remains a 14-day exception, not a public payload.
+  const retentions = build.split(/\n(?=      - )/)
+    .filter((step) => step.includes("actions/upload-artifact@"))
+    .map((step) => [step.match(/^\s+name: (.+)$/m)?.[1], Number(step.match(/retention-days: (\d+)/)?.[1])]);
+  assert.deepEqual(retentions, [
+    ["release-plan", 90],
+    ["spreadsheet-preview-budget-windows${{ matrix.evidence_suffix }}", 90],
+    ["image-model-smoke-windows${{ matrix.evidence_suffix }}", 90],
+    ["arm64-install-evidence", 90],
+    ["titlebar-windows${{ matrix.evidence_suffix }}", 90],
+    ["failure-continuity-windows${{ matrix.evidence_suffix }}", 90],
+    ["build-acceptance-${{ matrix.arch }}", 90],
+    ["windows-${{ matrix.arch }}", 1],
+    ["macos-pending", 14],
+    ["windows-mirror-readiness", 90],
+    ["complete-mirror-readiness", 90],
+    ["release-result-${{ inputs.version }}", 90],
+  ]);
   assert.match(
     build,
     /gh release create "\$tag" --repo "\$GITHUB_REPOSITORY" --draft/,
@@ -189,7 +186,19 @@ test("release workflows keep private source and credentials behind manual releas
     /bun install --cwd powerai-agent --filter '\.\/packages\/opencode' --filter '\.\/packages\/app' --frozen-lockfile/,
   );
   assert.doesNotMatch(build, /bun install --cwd powerai-agent --frozen-lockfile/);
-  assert.doesNotMatch(build, /windows-update-acceptance:|tests\/manual\/auto-update\/verify\.mjs/);
+  // One reusable implementation owns installed verification; the build waits
+  // for actual mirror readiness and supplies the frozen per-architecture source.
+  assert.doesNotMatch(build, /tests\/manual\/auto-update\/verify\.mjs/);
+  const installed = build.slice(build.indexOf("\n  installed-windows:"), build.indexOf("\n  complete-mirror-ready:"));
+  assert.match(installed, /needs: \[guard, windows-mirror-ready\]/);
+  assert.match(installed, /uses: \.\/\.github\/workflows\/verify-desktop-update\.yml/);
+  assert.match(installed, /from_version: \$\{\{ matrix.from_version \}\}/);
+  assert.match(installed, /target_channel: \$\{\{ needs.guard.outputs.channel \}\}/);
+  assert.match(installed, /secrets: inherit/);
+  assert.match(build, /group:.*'powerai-release-publish'/);
+  assert.match(build, /cancel-in-progress: false/);
+  assert.match(build, /gh workflow run finalize-notarization.yml/);
+  assert.match(build, /scripts\/release-result.mjs acceptance release-result.json/);
   assert.doesNotMatch(build, /cleanup-failed-candidate:|Withdraw failed Windows candidate/);
   assert.deepEqual(
     build
