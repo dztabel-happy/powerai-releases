@@ -15,6 +15,14 @@ on:
         description: Exact 40-character private Desktop commit containing the acceptance harness
         required: true
         type: string
+      arch:
+        description: Windows architecture of both the published source and target
+        required: true
+        default: x64
+        type: choice
+        options:
+          - x64
+          - arm64
       require_windows_signature:
         description: Require source installer/application signatures (false for current unsigned Windows releases)
         required: false
@@ -33,22 +41,23 @@ permissions:
   contents: read
 
 concurrency:
-  group: powerai-update-${{ inputs.target_channel }}-${{ inputs.from_version }}-${{ inputs.to_version }}
+  group: powerai-update-${{ inputs.arch }}-${{ inputs.target_channel }}-${{ inputs.from_version }}-${{ inputs.to_version }}
   cancel-in-progress: false
 
 env:
   RELEASE_REPOSITORY: dztabel-happy/powerai-releases
 
 jobs:
-  windows-x64:
-    name: Windows x64 installed update
-    runs-on: windows-2025
+  windows-update:
+    name: Windows ${{ inputs.arch }} installed update
+    runs-on: ${{ inputs.arch == 'arm64' && 'windows-11-arm' || 'windows-2025' }}
     environment: release
     timeout-minutes: 30
     env:
       FROM_VERSION: ${{ inputs.from_version }}
       TO_VERSION: ${{ inputs.to_version }}
       TARGET_CHANNEL: ${{ inputs.target_channel }}
+      TARGET_ARCH: ${{ inputs.arch }}
       DESKTOP_REF: ${{ inputs.desktop_ref }}
       REQUIRE_WINDOWS_SIGNATURE: ${{ inputs.require_windows_signature }}
     steps:
@@ -60,7 +69,25 @@ jobs:
           [[ "$DESKTOP_REF" =~ ^[0-9a-f]{40}$ ]] || exit 1
           [[ "$FROM_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$ ]] || exit 1
           [[ "$TO_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+(-dev\.[0-9]+)?$ ]] || exit 1
-          [[ "$TARGET_CHANNEL" = stable || "$TARGET_CHANNEL" = dev ]]
+          [[ "$TARGET_CHANNEL" = stable || "$TARGET_CHANNEL" = dev ]] || exit 1
+          [[ "$TARGET_ARCH" = x64 || "$TARGET_ARCH" = arm64 ]] || exit 1
+          transition=none
+          if [[ "$TARGET_CHANNEL" = dev && "$FROM_VERSION" != *-dev.* ]]; then
+            transition=stable-to-dev
+          fi
+          echo "CHANNEL_TRANSITION=$transition" >> "$GITHUB_ENV"
+
+      - name: Restrict ARM64 runner temporary directory permissions
+        if: inputs.arch == 'arm64'
+        shell: pwsh
+        run: |
+          # Match the native ARM build lane: OpenSSH must not inherit broad
+          # access to its temporary checkout key from this runner directory.
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          icacls $env:RUNNER_TEMP /inheritance:r /grant:r "*${sid}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls $env:RUNNER_TEMP /remove:g '*S-1-5-11' '*S-1-5-32-545'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Checkout exact private Desktop harness
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -107,9 +134,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\download" | Out-Null
-          gh release download "v$env:FROM_VERSION" --repo $env:RELEASE_REPOSITORY --pattern "PowerAI-$($env:FROM_VERSION)-win-x64.exe" --dir "$env:RUNNER_TEMP\download"
+          gh release download "v$env:FROM_VERSION" --repo $env:RELEASE_REPOSITORY --pattern "PowerAI-$($env:FROM_VERSION)-win-$($env:TARGET_ARCH).exe" --dir "$env:RUNNER_TEMP\download"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $installer = "$env:RUNNER_TEMP\download\PowerAI-$($env:FROM_VERSION)-win-x64.exe"
+          $installer = "$env:RUNNER_TEMP\download\PowerAI-$($env:FROM_VERSION)-win-$($env:TARGET_ARCH).exe"
           if ($env:REQUIRE_WINDOWS_SIGNATURE -eq 'true') {
             $signature = Get-AuthenticodeSignature -LiteralPath $installer
             if ($signature.Status -ne 'Valid') { throw "Installer signature is $($signature.Status)" }
@@ -127,22 +154,21 @@ jobs:
         shell: pwsh
         working-directory: powerai-desktop
         run: |
-          $transition = 'none'
-          if ($env:TARGET_CHANNEL -eq 'dev') { $transition = 'stable-to-dev' }
           node tests/manual/auto-update/verify.mjs `
             "--executable=$env:RUNNER_TEMP\PowerAI\PowerAI.exe" `
             "--user-data-dir=$env:RUNNER_TEMP\user-data" `
             "--from=$env:FROM_VERSION" `
             "--to=$env:TO_VERSION" `
-            "--channel-transition=$transition" `
-            "--evidence=$env:RUNNER_TEMP\update-acceptance-windows.json"
+            "--arch=$env:TARGET_ARCH" `
+            "--channel-transition=$env:CHANNEL_TRANSITION" `
+            "--evidence=$env:RUNNER_TEMP\update-acceptance-windows-$env:TARGET_ARCH.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Print installed update evidence
         if: always()
         shell: pwsh
         run: |
-          $evidence = Join-Path $env:RUNNER_TEMP 'update-acceptance-windows.json'
+          $evidence = Join-Path $env:RUNNER_TEMP "update-acceptance-windows-$env:TARGET_ARCH.json"
           if (Test-Path $evidence) {
             $result = Get-Content -Raw $evidence
             Write-Host $result
@@ -156,7 +182,9 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:
-          name: update-acceptance-windows-${{ inputs.target_channel }}-${{ inputs.from_version }}-${{ inputs.to_version }}
+          name: update-acceptance-windows-${{ inputs.arch }}-${{ inputs.target_channel }}-${{ inputs.from_version }}-${{ inputs.to_version }}
           if-no-files-found: warn
           retention-days: 3
-          path: ${{ runner.temp }}/update-acceptance-windows.json
+          path: |
+            ${{ runner.temp }}/update-acceptance-windows-${{ inputs.arch }}.json
+            ${{ runner.temp }}/update-acceptance-windows-${{ inputs.arch }}.json.diagnostics/
