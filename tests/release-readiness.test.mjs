@@ -217,8 +217,41 @@ async function fixture(t, { arm = true } = {}) {
   };
 }
 
-const wait = (plan, f, phase = "windows", seconds = 2) =>
-  waitForRelease(plan, { phase, timeoutSeconds: seconds }, f.deps);
+const wait = (plan, f, phase = "windows") =>
+  waitForRelease(plan, { phase, timeoutSeconds: 2 }, f.deps);
+
+async function assertPendingTimeout(plan, f, phase, reason) {
+  const pending = [];
+  let elapsed = 0;
+  // HTTP remains real and gets a 15-second request budget. Only polling advances
+  // the logical deadline, so runner load cannot replace the observed failure.
+  await assert.rejects(
+    waitForRelease(
+      plan,
+      { phase, timeoutSeconds: 30 },
+      {
+        ...f.deps,
+        now: () => elapsed,
+        sleep: async (ms) => {
+          elapsed += ms;
+        },
+        pollIntervalMs: 15000,
+        onPending: (state) => pending.push(state),
+      },
+    ),
+    (error) => {
+      assert.equal(error.report.status, "failed");
+      assert.equal(error.report.attempts, 2);
+      assert.equal(error.message, `Readiness timed out: ${reason}`);
+      return true;
+    },
+  );
+  assert.equal(elapsed, 30000);
+  assert.deepEqual(pending, [
+    { attempts: 1, reason },
+    { attempts: 2, reason },
+  ]);
+}
 
 function publishTarget(f, { mac = false, arm = false } = {}) {
   const target = f.publish(input.version, arm ? ["x64", "arm64"] : ["x64"], mac);
@@ -289,10 +322,10 @@ test("pending marker and partial Mac assets never turn a bounded wait green", as
   target.update();
   f.mirror(target, "dev", f.previous, [f.previous, f.previous0, f.stable]);
   assert.equal((await wait(plan, f)).macComplete, false);
-  await assert.rejects(wait(plan, f, "complete", 0.06), /timed out/);
+  await assertPendingTimeout(plan, f, "complete", "Mac notarization/assets are still pending");
   target.contents.set(`PowerAI-${input.version}-mac-arm64.dmg`, Buffer.from("partial"));
   target.update();
-  await assert.rejects(wait(plan, f, "windows", 0.06), /timed out.*appended/);
+  await assertPendingTimeout(plan, f, "windows", "Mac assets are being appended");
 });
 
 test("missing HTTP files and transient 503 retry, then pass only when actual bytes arrive", async (t) => {
@@ -304,7 +337,7 @@ test("missing HTTP files and transient 503 retry, then pass only when actual byt
   const result = await wait(plan, f);
   assert.ok(result.attempts >= 2);
   f.bodies.delete(url);
-  await assert.rejects(wait(plan, f, "windows", 0.06), /timed out.*404/);
+  await assertPendingTimeout(plan, f, "windows", `HTTP 404: ${url}`);
   f.bodies.set(url, target.contents.get(`PowerAI-${input.version}-win-x64.exe.blockmap`));
 });
 
@@ -501,7 +534,17 @@ test("real prepare/wait CLI writes the workflow outputs and a failed bounded-wai
   // Test-only loader sends the unmodified CLI's fixed public URLs to this real HTTP fixture.
   fs.writeFileSync(
     preload,
-    `const original = globalThis.fetch; globalThis.fetch = (url, options) => original(String(url).replace("https://api.github.com", ${JSON.stringify(f.base)}).replace("https://powerai.dztabel.com/releases", ${JSON.stringify(`${f.base}/mirror`)}), options);`,
+    `const original = globalThis.fetch;
+     globalThis.fetch = (url, options) => original(String(url).replace("https://api.github.com", ${JSON.stringify(f.base)}).replace("https://powerai.dztabel.com/releases", ${JSON.stringify(`${f.base}/mirror`)}), options);
+     // Advance only the CLI's 60-second readiness polling sleep; HTTP requests
+     // and their native AbortSignal timeouts still run against the real server.
+     let now = Date.now();
+     Date.now = () => now;
+     const timeout = globalThis.setTimeout;
+     globalThis.setTimeout = (callback, delay, ...args) => {
+       if (delay === 60000) { now += delay; return timeout(callback, 0, ...args); }
+       return timeout(callback, delay, ...args);
+     };`,
   );
   const planFile = path.join(directory, "release-plan.json");
   const resultFile = path.join(directory, "result.json");
@@ -553,12 +596,14 @@ test("real prepare/wait CLI writes the workflow outputs and a failed bounded-wai
       "--output",
       resultFile,
       "--timeout-seconds",
-      "0.05",
+      "60",
     ]),
     (error) => error.code === 1,
   );
-  assert.equal(JSON.parse(fs.readFileSync(resultFile)).status, "failed");
-  assert.match(JSON.parse(fs.readFileSync(resultFile)).reason, /timed out/);
+  const failed = JSON.parse(fs.readFileSync(resultFile));
+  assert.equal(failed.status, "failed");
+  assert.equal(failed.attempts, 1);
+  assert.equal(failed.reason, "Readiness timed out: Mac notarization/assets are still pending");
 });
 
 test("an in-progress GitHub asset upload is bounded pending rather than a corrupt release", async (t) => {
