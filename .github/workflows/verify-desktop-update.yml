@@ -1,6 +1,37 @@
 name: Verify PowerAI Desktop Update
 
 on:
+  workflow_call:
+    inputs:
+      from_version:
+        description: Installed public version before update
+        required: true
+        type: string
+      to_version:
+        description: Current latest public version after update
+        required: true
+        type: string
+      desktop_ref:
+        description: Exact 40-character private Desktop commit containing the acceptance harness
+        required: true
+        type: string
+      arch:
+        description: Windows architecture of both the published source and target
+        required: true
+        type: string
+      require_windows_signature:
+        description: Require source installer/application signatures (false for current unsigned Windows releases)
+        required: false
+        default: false
+        type: boolean
+      target_channel:
+        description: Update channel selected by the installed source app
+        required: true
+        type: string
+    outputs:
+      accepted:
+        description: True only after the installed update JSON passes all required checks
+        value: ${{ jobs.windows-update.outputs.accepted }}
   workflow_dispatch:
     inputs:
       from_version:
@@ -53,6 +84,8 @@ jobs:
     runs-on: ${{ inputs.arch == 'arm64' && 'windows-11-arm' || 'windows-2025' }}
     environment: release
     timeout-minutes: 30
+    outputs:
+      accepted: ${{ steps.acceptance.outputs.accepted || 'false' }}
     env:
       FROM_VERSION: ${{ inputs.from_version }}
       TO_VERSION: ${{ inputs.to_version }}
@@ -76,6 +109,13 @@ jobs:
             transition=stable-to-dev
           fi
           echo "CHANNEL_TRANSITION=$transition" >> "$GITHUB_ENV"
+
+      - name: Require private harness deploy key
+        shell: bash
+        env:
+          DEPLOY_KEY: ${{ secrets.POWERAI_DESKTOP_DEPLOY_KEY }}
+        run: |
+          test -n "$DEPLOY_KEY" || { echo 'Private Desktop deploy key is unavailable.' >&2; exit 1; }
 
       - name: Restrict ARM64 runner temporary directory permissions
         if: inputs.arch == 'arm64'
@@ -128,7 +168,7 @@ jobs:
           node tests/manual/auto-update/validate-release.mjs $catalog
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
-      - name: Install source version
+      - name: Download source installer and published provenance
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
@@ -136,6 +176,42 @@ jobs:
           New-Item -ItemType Directory -Force -Path "$env:RUNNER_TEMP\download" | Out-Null
           gh release download "v$env:FROM_VERSION" --repo $env:RELEASE_REPOSITORY --pattern "PowerAI-$($env:FROM_VERSION)-win-$($env:TARGET_ARCH).exe" --dir "$env:RUNNER_TEMP\download"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          gh release download "v$env:FROM_VERSION" --repo $env:RELEASE_REPOSITORY --pattern 'release-provenance.json' --dir "$env:RUNNER_TEMP\download"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Verify source installer against published provenance
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const directory = path.join(process.env.RUNNER_TEMP, 'download');
+          const name = `PowerAI-${process.env.FROM_VERSION}-win-${process.env.TARGET_ARCH}.exe`;
+          const provenanceBytes = fs.readFileSync(path.join(directory, 'release-provenance.json'));
+          const provenance = JSON.parse(provenanceBytes);
+          assert.equal(provenance.schemaVersion, 1, 'Unsupported source provenance schema');
+          assert.equal(provenance.version, process.env.FROM_VERSION, 'Source provenance version mismatch');
+          const expectedSha256 = provenance.assets?.[name];
+          assert.match(expectedSha256 ?? '', /^[a-f0-9]{64}$/, 'Source installer digest is missing or invalid');
+          const hash = crypto.createHash('sha256');
+          for await (const chunk of fs.createReadStream(path.join(directory, name))) hash.update(chunk);
+          const actualSha256 = hash.digest('hex');
+          assert.equal(actualSha256, expectedSha256, 'Source installer SHA-256 does not match published provenance');
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'source-installer-integrity.json'), JSON.stringify({
+            verified: true, version: provenance.version, arch: process.env.TARGET_ARCH,
+            name, expectedSha256, actualSha256,
+            size: fs.statSync(path.join(directory, name)).size,
+            provenanceSha256: crypto.createHash('sha256').update(provenanceBytes).digest('hex'),
+            desktopCommit: provenance.desktopCommit, agentCommit: provenance.agentCommit,
+            workflowRun: provenance.workflowRun,
+          }, null, 2) + '\n');
+          NODE
+
+      - name: Install source version
+        shell: pwsh
+        run: |
           $installer = "$env:RUNNER_TEMP\download\PowerAI-$($env:FROM_VERSION)-win-$($env:TARGET_ARCH).exe"
           if ($env:REQUIRE_WINDOWS_SIGNATURE -eq 'true') {
             $signature = Get-AuthenticodeSignature -LiteralPath $installer
@@ -164,6 +240,64 @@ jobs:
             "--evidence=$env:RUNNER_TEMP\update-acceptance-windows-$env:TARGET_ARCH.json"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+      - name: Validate installed update evidence
+        id: acceptance
+        shell: bash
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import crypto from 'node:crypto';
+          import fs from 'node:fs';
+          import path from 'node:path';
+          const file = path.join(process.env.RUNNER_TEMP, `update-acceptance-windows-${process.env.TARGET_ARCH}.json`);
+          const bytes = fs.readFileSync(file);
+          const evidence = JSON.parse(bytes);
+          const integrity = JSON.parse(fs.readFileSync(path.join(process.env.RUNNER_TEMP, 'source-installer-integrity.json')));
+          assert.equal(integrity.verified, true, 'Source installer digest was not verified');
+          assert.equal(integrity.version, process.env.FROM_VERSION);
+          assert.equal(integrity.arch, process.env.TARGET_ARCH);
+          for (const [key, expected] of Object.entries({
+            fromVersion: process.env.FROM_VERSION, toVersion: process.env.TO_VERSION,
+            installedVersion: process.env.TO_VERSION, platform: 'win32',
+            expectedArch: process.env.TARGET_ARCH, sourceExecutableArch: process.env.TARGET_ARCH,
+            installedExecutableArch: process.env.TARGET_ARCH, harnessCommit: process.env.DESKTOP_REF,
+            channelTransition: process.env.CHANNEL_TRANSITION, relaunchMode: 'controlled',
+            expectedRoute: 'any', firstAutomaticRelaunch: false, sourceExitCode: 0,
+            updateInstallerExited: true, userDataRetained: true, noRestartLoop: true,
+          })) assert.equal(evidence[key], expected, `Acceptance evidence mismatch: ${key}`);
+          if (process.env.CHANNEL_TRANSITION === 'stable-to-dev') {
+            assert.equal(evidence.prereleaseEnabledWithoutRestart, true, 'Dev channel transition did not pass');
+            assert.equal(evidence.discoveredVersion, process.env.TO_VERSION, 'Dev channel discovered the wrong version');
+          }
+          assert.equal(evidence.documentEngine?.pdfConversion, true, 'Real PDF conversion did not pass');
+          assert.ok(!evidence.error && !evidence.failedAt && !evidence.routeDiagnosticError, 'Acceptance recorded a failure');
+          assert.ok(Number.isFinite(Date.parse(evidence.startedAt)) &&
+            Number.isFinite(Date.parse(evidence.completedAt)) &&
+            Date.parse(evidence.completedAt) >= Date.parse(evidence.startedAt), 'Acceptance did not complete');
+          assert.ok(['staged', 'nsis', 'unknown'].includes(evidence.updateRoute?.route), 'Invalid or conflicting update route');
+          const titlebar = evidence.windowsTitlebar;
+          assert.ok(titlebar && ['reservedWidth', 'safeRight', 'paddingRight', 'interactiveRight']
+            .every((key) => Number.isFinite(titlebar[key])), 'Titlebar checks are missing');
+          assert.ok(titlebar.reservedWidth > 0 && titlebar.paddingRight >= titlebar.reservedWidth &&
+            titlebar.interactiveRight <= titlebar.safeRight, 'Titlebar safe area check did not pass');
+          const summary = {
+            accepted: true, fromVersion: evidence.fromVersion, toVersion: evidence.toVersion,
+            channel: process.env.TARGET_CHANNEL, channelTransition: evidence.channelTransition, arch: evidence.expectedArch,
+            harnessCommit: evidence.harnessCommit, completedAt: evidence.completedAt,
+            relaunchMode: evidence.relaunchMode, firstAutomaticRelaunch: false,
+            updateRoute: evidence.updateRoute, sourceInstaller: integrity,
+            userDataRetained: true, noRestartLoop: true, pdfConversion: true, titlebarPassed: true,
+            evidenceSha256: crypto.createHash('sha256').update(bytes).digest('hex'),
+            boundaries: ['Controlled relaunch does not verify the first automatic target launch.',
+              'Source installer digest verification does not measure installed source/target payload hashes.'],
+          };
+          fs.writeFileSync(path.join(process.env.RUNNER_TEMP, 'installed-update-summary.json'), JSON.stringify(summary, null, 2) + '\n');
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY,
+            `### Installed update accepted\n${summary.fromVersion} → ${summary.toVersion} (${summary.arch}, ${summary.channel})\n\n` +
+            `Route: ${summary.updateRoute.route}; relaunch: controlled; first automatic launch: unverified.\n`);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'accepted=true\n');
+          NODE
+
       - name: Print installed update evidence
         if: always()
         shell: pwsh
@@ -184,7 +318,10 @@ jobs:
         with:
           name: update-acceptance-windows-${{ inputs.arch }}-${{ inputs.target_channel }}-${{ inputs.from_version }}-${{ inputs.to_version }}
           if-no-files-found: warn
-          retention-days: 3
+          retention-days: 90
           path: |
             ${{ runner.temp }}/update-acceptance-windows-${{ inputs.arch }}.json
             ${{ runner.temp }}/update-acceptance-windows-${{ inputs.arch }}.json.diagnostics/
+            ${{ runner.temp }}/installed-update-summary.json
+            ${{ runner.temp }}/source-installer-integrity.json
+            ${{ runner.temp }}/download/release-provenance.json

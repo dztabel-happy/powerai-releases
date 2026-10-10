@@ -26,7 +26,7 @@ env:
 jobs:
   finalize:
     name: Poll and finalize pending release
-    runs-on: macos-14
+    runs-on: macos-15
     environment: release
     timeout-minutes: 60
     steps:

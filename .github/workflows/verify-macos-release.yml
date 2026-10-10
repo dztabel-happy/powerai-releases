@@ -1,0 +1,137 @@
+name: Verify Official macOS Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Exact published version
+        required: true
+        type: string
+      desktop_ref:
+        description: Exact 40-character Desktop commit in release provenance
+        required: true
+        type: string
+      agent_ref:
+        description: Exact 40-character Agent commit in release provenance
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      version:
+        required: true
+        type: string
+      desktop_ref:
+        required: true
+        type: string
+      agent_ref:
+        required: true
+        type: string
+    outputs:
+      accepted:
+        description: True only after official package runtime and evidence retention succeed
+        value: ${{ jobs.macos.outputs.accepted }}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: powerai-macos-acceptance-${{ inputs.version }}
+  cancel-in-progress: false
+
+jobs:
+  macos:
+    runs-on: macos-15
+    environment: release
+    timeout-minutes: 45
+    outputs:
+      accepted: ${{ steps.accepted.outputs.accepted }}
+    env:
+      VERSION: ${{ inputs.version }}
+      DESKTOP_REF: ${{ inputs.desktop_ref }}
+      AGENT_REF: ${{ inputs.agent_ref }}
+    steps:
+      - name: Define the retained evidence directory
+        run: echo "EVIDENCE_DIR=$RUNNER_TEMP/macos-official-acceptance" >> "$GITHUB_ENV"
+
+      - name: Checkout acceptance tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+          path: release-tools
+
+      - name: Set up Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+
+      - name: Validate exact inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_REF_NAME" = main
+          node release-tools/scripts/verify-macos-release.mjs validate \
+            "--version=$VERSION" "--desktop-ref=$DESKTOP_REF" "--agent-ref=$AGENT_REF" \
+            "--desktop-dir=$GITHUB_WORKSPACE/powerai-desktop" "--output=$EVIDENCE_DIR"
+
+      - name: Checkout exact private Desktop harness
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: dztabel-happy/powerai-desktop
+          ref: ${{ inputs.desktop_ref }}
+          ssh-key: ${{ secrets.POWERAI_DESKTOP_DEPLOY_KEY }}
+          persist-credentials: false
+          path: powerai-desktop
+          fetch-depth: 1
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+        with:
+          bun-version: 1.3.13
+
+      - name: Install locked harness dependencies
+        working-directory: powerai-desktop
+        run: bun install --frozen-lockfile
+
+      - name: Verify and run the official notarized package
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          node release-tools/scripts/verify-macos-release.mjs run \
+            "--version=$VERSION" "--desktop-ref=$DESKTOP_REF" "--agent-ref=$AGENT_REF" \
+            "--desktop-dir=$GITHUB_WORKSPACE/powerai-desktop" "--output=$EVIDENCE_DIR"
+
+      - name: Summarize the actual acceptance scope
+        if: always()
+        shell: bash
+        run: |
+          {
+            printf '### Official Mac package runtime acceptance\n\n'
+            printf 'Version: `%s`; Desktop: `%s`; Agent: `%s`.\n\n' "$VERSION" "$DESKTOP_REF" "$AGENT_REF"
+            printf 'This runs the published signed package through spreadsheet preview, save and lifecycle checks. It is not Mac automatic-update acceptance or a real-model/Agent conversation.\n\n'
+            if [ -f "$EVIDENCE_DIR/execution.json" ]; then
+              printf '\x60\x60\x60json\n'
+              cat "$EVIDENCE_DIR/execution.json"
+              printf '\x60\x60\x60\n'
+            else
+              printf 'Acceptance did not produce execution evidence; it has not passed.\n'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Retain official package acceptance evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: macos-official-acceptance-${{ inputs.version }}
+          path: ${{ runner.temp }}/macos-official-acceptance/
+          retention-days: 90
+          if-no-files-found: error
+
+      - name: Expose successful acceptance
+        id: accepted
+        shell: bash
+        run: |
+          set -euo pipefail
+          jq -e '.accepted == true' "$EVIDENCE_DIR/execution.json" >/dev/null
+          echo 'accepted=true' >> "$GITHUB_OUTPUT"
