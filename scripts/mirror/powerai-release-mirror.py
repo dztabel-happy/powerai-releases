@@ -10,20 +10,22 @@ Two channels, each a self-contained directory the client can point at:
 
 Pull-based (no CI secrets on this box). Downloads into a staging dir, verifies
 every asset against release-provenance.json sha256 hashes, then swaps the
-channel directory atomically. Only these two directories are kept: this box has
-single-digit GB free, so every other release is pruned.
+channel directory. Each channel also keeps a bounded set of verified historical
+Windows blockmaps; historical installers are never retained.
 """
 import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import sys
 import urllib.request
 
-REPO_API = "https://api.github.com/repos/dztabel-happy/powerai-releases/releases?per_page=20"
+REPO_API = "https://api.github.com/repos/dztabel-happy/powerai-releases/releases?per_page=100"
 DEST = "/var/www/powerai-releases"
 CHANNELS = ("latest", "dev")
+HISTORY_RELEASES = 2
 # A build someone was asked to install by hand, kept out of the channel
 # churn: the dev channel only ever holds the newest build, so handing
 # anyone a link to a specific one needs somewhere prune() will not sweep.
@@ -80,51 +82,114 @@ def current_tag(channel):
         return handle.read().strip()
 
 
-def mirror(release, channel):
-    """Download, verify and atomically install one release into one channel."""
+def windows_blockmaps(release):
+    version = release["tag_name"].removeprefix("v")
+    names = {"PowerAI-%s-win-%s.exe.blockmap" % (version, arch) for arch in ("x64", "arm64")}
+    return [asset for asset in release["assets"] if asset["name"] in names]
+
+
+def history_releases(releases, release, channel, stable):
+    older = sorted(
+        (r for r in releases if version_key(r["tag_name"]) < version_key(release["tag_name"])
+         and (channel == "dev" or not r.get("prerelease")) and windows_blockmaps(r)),
+        key=lambda r: version_key(r["tag_name"]), reverse=True,
+    )[:HISTORY_RELEASES]
+    # A stable client opting into dev needs its old blockmap in the dev URL,
+    # even after enough prereleases have displaced stable from the recent two.
+    if channel == "dev" and stable and stable["tag_name"] != release["tag_name"] and stable not in older:
+        older.append(stable)
+    return older
+
+
+def read_provenance(release, cache):
+    tag = release["tag_name"]
+    if tag not in cache:
+        asset = next((a for a in release["assets"] if a["name"] == "release-provenance.json"), None)
+        if asset is None:
+            raise ValueError("no provenance in " + tag + "; refusing to mirror")
+        body = fetch(asset["browser_download_url"])
+        checksums = json.loads(body)["assets"]
+        if not isinstance(checksums, dict) or any(
+            os.path.basename(name) != name or name in (".", "..")
+            or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            for name, digest in checksums.items()
+        ):
+            raise ValueError("invalid provenance in " + tag)
+        cache[tag] = (body, checksums)
+    return cache[tag]
+
+
+def file_digest(file):
+    digest = hashlib.sha256()
+    with open(file, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def stage_asset(asset, staging, expected=None):
+    name = asset["name"]
+    if os.path.basename(name) != name or name in (".", ".."):
+        raise ValueError("invalid asset name: " + name)
+    target = os.path.join(staging, name)
+    # Rehash before linking: adding history or notarized macOS assets should not
+    # download/copy hundreds of MB of unchanged installers on this small VPS.
+    for channel in CHANNELS:
+        existing = os.path.join(DEST, channel, name)
+        if expected and os.path.isfile(existing) and file_digest(existing) == expected:
+            os.link(existing, target)
+            return
+    print("downloading " + name, flush=True)
+    fetch(asset["browser_download_url"], target)
+    if expected and file_digest(target) != expected:
+        raise ValueError("HASH MISMATCH for " + name + "; aborting mirror")
+
+
+def mirror(release, channel, provenance, blockmaps, fingerprint):
+    """Verify a complete staging directory before replacing a channel."""
     tag = release["tag_name"]
     staging = os.path.join(DEST, ".staging-" + channel)
     shutil.rmtree(staging, ignore_errors=True)
     os.makedirs(staging, exist_ok=True)
+    if set(provenance[1]) - {asset["name"] for asset in release["assets"]}:
+        raise ValueError("provenance references missing release assets in " + tag)
+    with open(os.path.join(staging, "release-provenance.json"), "wb") as handle:
+        handle.write(provenance[0])
     for asset in release["assets"]:
-        print("downloading %s -> %s" % (asset["name"], channel), flush=True)
-        fetch(asset["browser_download_url"], os.path.join(staging, asset["name"]))
-    provenance_path = os.path.join(staging, "release-provenance.json")
-    if not os.path.exists(provenance_path):
-        print("no provenance in " + tag + "; refusing to mirror", file=sys.stderr)
-        shutil.rmtree(staging, ignore_errors=True)
-        return 1
-    with open(provenance_path) as handle:
-        provenance = json.load(handle)
-    for name, expected in provenance["assets"].items():
-        with open(os.path.join(staging, name), "rb") as handle:
-            digest = hashlib.sha256(handle.read()).hexdigest()
-        if digest != expected:
-            print("HASH MISMATCH for " + name + "; aborting mirror", file=sys.stderr)
-            shutil.rmtree(staging, ignore_errors=True)
-            return 1
+        if asset["name"] != "release-provenance.json":
+            stage_asset(asset, staging, provenance[1].get(asset["name"]))
+    for asset, expected in blockmaps:
+        stage_asset(asset, staging, expected)
     with open(os.path.join(staging, ".tag"), "w") as handle:
         handle.write(tag)
     # Written last, and only after every digest matched: a fingerprint present
     # in a channel directory means that exact asset set is installed there.
     with open(os.path.join(staging, ".fingerprint"), "w") as handle:
-        handle.write(release_fingerprint(release))
+        handle.write(fingerprint)
     target = os.path.join(DEST, channel)
     backup = os.path.join(DEST, ".previous-" + channel)
     shutil.rmtree(backup, ignore_errors=True)
     if os.path.exists(target):
         os.rename(target, backup)
-    os.rename(staging, target)
+    try:
+        os.rename(staging, target)
+    except OSError:
+        if os.path.exists(backup):
+            os.rename(backup, target)
+        raise
     shutil.rmtree(backup, ignore_errors=True)
     print("mirrored %s into %s" % (tag, channel))
     return 0
 
 
 def prune():
-    """Keep the two channel directories and nothing else."""
+    """Keep channels, pinned builds and any backup still needed for recovery."""
     for entry in os.listdir(DEST):
         if entry in CHANNELS or entry == HOLD_DIR:
             continue
+        if entry in {".previous-" + channel for channel in CHANNELS}:
+            if not os.path.exists(os.path.join(DEST, entry.removeprefix(".previous-"))):
+                continue
         path = os.path.join(DEST, entry)
         print("pruning " + path, flush=True)
         shutil.rmtree(path, ignore_errors=True) if os.path.isdir(path) else os.remove(path)
@@ -145,6 +210,14 @@ def main():
         print("another mirror run is in progress; leaving it to finish")
         return 0
 
+    # Recover if a prior process stopped between the two directory renames.
+    # Do this before any HTTP requests, and before prune can remove the backup.
+    for channel in CHANNELS:
+        target = os.path.join(DEST, channel)
+        backup = os.path.join(DEST, ".previous-" + channel)
+        if not os.path.exists(target) and os.path.exists(backup):
+            os.rename(backup, target)
+
     releases = [r for r in json.loads(fetch(REPO_API)) if not r.get("draft")]
     if not releases:
         return 0
@@ -152,12 +225,30 @@ def main():
     newest = max(releases, key=lambda r: version_key(r["tag_name"]))
 
     status = 0
+    provenance_cache = {}
     for channel, release in (("latest", stable), ("dev", newest)):
         if release is None:
             continue
-        if current_fingerprint(channel) == release_fingerprint(release).strip():
-            continue
-        status |= mirror(release, channel)
+        try:
+            provenance = read_provenance(release, provenance_cache)
+            blockmaps = [
+                (asset, read_provenance(old, provenance_cache)[1][asset["name"]])
+                for old in history_releases(releases, release, channel, stable)
+                for asset in windows_blockmaps(old)
+            ]
+            fingerprint = "\n".join([
+                release_fingerprint(release),
+                "provenance-sha256:" + hashlib.sha256(provenance[0]).hexdigest(),
+                "retained-blockmaps-v1",
+                *sorted(asset["name"] + ":" + expected for asset, expected in blockmaps),
+            ])
+            if current_fingerprint(channel) == fingerprint:
+                continue
+            status |= mirror(release, channel, provenance, blockmaps, fingerprint)
+        except (OSError, ValueError, KeyError) as error:
+            print("cannot mirror %s: %s" % (channel, error), file=sys.stderr)
+            shutil.rmtree(os.path.join(DEST, ".staging-" + channel), ignore_errors=True)
+            status = 1
     prune()
     return status
 
