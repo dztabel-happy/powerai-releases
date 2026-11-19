@@ -57,7 +57,8 @@ run(office, ['close', 'office.xlsx']);
 
 const docx = binary('docxkit', 'docx-kit');
 const chart = binary('chartkit', 'chart-kit');
-assert.equal(machine(docx), 0x8664, 'The pinned standalone DocxKit uses Windows x64 emulation');
+assert.equal(machine(docx), 0xaa64, 'The Desktop DocxKit launcher must be ARM64');
+assert.equal(machine(path.join(path.dirname(docx), 'engine', 'docx-kit.exe')), 0x8664, 'The pinned DocxKit engine uses Windows x64 emulation');
 assert.equal(machine(chart), 0x8664, 'The pinned standalone ChartKit uses Windows x64 emulation');
 fs.writeFileSync(path.join(cwd, 'content.md'), '# 架构验收\n\n这是隔离测试目录中的 Word 生成验收。\n');
 run(docx, ['build', 'content.md', '--out', 'word', '--filename', 'arm64.docx']);
@@ -71,5 +72,5 @@ fs.writeFileSync(path.join(cwd, 'figure.json'), JSON.stringify({
 run(chart, ['build', 'figure.json', '--out', 'chart', '--theme', 'business-cn', '--format', 'all']);
 const figures = fs.readdirSync(path.join(cwd, 'chart'), { recursive: true }).filter((name) => String(name).endsWith('.png'));
 assert.ok(figures.length > 0, 'ChartKit must actually render PNG output');
-fs.writeFileSync(path.join(root, 'evidence.json'), JSON.stringify({ ...evidence, passed: true, installed: true, agent: 'arm64', officecli: 'arm64', docxkit: 'x64-emulation', chartkit: 'x64-emulation', wordCreated: true, spreadsheetReadback: true, chartRendered: true }, null, 2));
+fs.writeFileSync(path.join(root, 'evidence.json'), JSON.stringify({ ...evidence, passed: true, installed: true, agent: 'arm64', officecli: 'arm64', docxkit: 'x64-emulation', docxkitLauncher: 'arm64', chartkit: 'x64-emulation', wordCreated: true, spreadsheetReadback: true, chartRendered: true }, null, 2));
 console.log('Installed ARM64 app and native/compatibility document tools passed.');
