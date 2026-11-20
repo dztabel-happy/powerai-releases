@@ -1,0 +1,121 @@
+name: Windows installed document tools candidate
+run-name: Windows document tools · ${{ inputs.desktop_ref }} · ${{ inputs.agent_ref }}
+on:
+  workflow_dispatch:
+    inputs:
+      desktop_ref:
+        description: Reviewed Desktop commit (full SHA)
+        type: string
+        required: true
+      agent_ref:
+        description: Reviewed Agent commit (full SHA)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.3.13
+
+jobs:
+  approve:
+    runs-on: ubuntu-24.04
+    environment: release-approval
+    steps:
+      - name: Validate approved source commits
+        shell: bash
+        env:
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+        run: |
+          test "$GITHUB_REF" = refs/heads/main
+          [[ "$DESKTOP_REF" =~ ^[0-9a-f]{40}$ && "$AGENT_REF" =~ ^[0-9a-f]{40}$ ]]
+
+  installed:
+    needs: approve
+    name: Installed document tools (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x64, runner: windows-2025 }
+          - { arch: arm64, runner: windows-11-arm }
+    runs-on: ${{ matrix.runner }}
+    environment: release
+    timeout-minutes: 120
+    steps:
+      - name: Restrict ARM64 runner temporary directory permissions
+        if: matrix.arch == 'arm64'
+        shell: pwsh
+        run: |
+          # Windows OpenSSH rejects keys inheriting Authenticated Users access
+          # from the ARM runner's temporary directory. Restrict inheritance
+          # before checkout writes keys; keep only runner/SYSTEM/admin access.
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          icacls $env:RUNNER_TEMP /inheritance:r /grant:r "*${sid}:(OI)(CI)F" "*S-1-5-18:(OI)(CI)F" "*S-1-5-32-544:(OI)(CI)F"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          icacls $env:RUNNER_TEMP /remove:g '*S-1-5-11' '*S-1-5-32-545'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Checkout exact desktop source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: dztabel-happy/powerai-desktop
+          ref: ${{ inputs.desktop_ref }}
+          ssh-key: ${{ secrets.POWERAI_DESKTOP_DEPLOY_KEY }}
+          path: powerai-desktop
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout exact agent source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          repository: dztabel-happy/powerai-agent
+          ref: ${{ inputs.agent_ref }}
+          ssh-key: ${{ secrets.POWERAI_AGENT_DEPLOY_KEY }}
+          path: powerai-agent
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Checkout release acceptance tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          path: release-tools
+
+      - name: Verify source commits
+        shell: bash
+        env:
+          DESKTOP_REF: ${{ inputs.desktop_ref }}
+          AGENT_REF: ${{ inputs.agent_ref }}
+        run: |
+          test "$(git -C powerai-desktop rev-parse HEAD)" = "$DESKTOP_REF"
+          test "$(git -C powerai-agent rev-parse HEAD)" = "$AGENT_REF"
+
+      - name: Build unsigned Windows installer
+        uses: ./release-tools/.github/actions/build-windows-installer
+        with:
+          arch: ${{ matrix.arch }}
+
+      - name: Set up native Node for installed verification
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 22
+          architecture: ${{ matrix.arch }}
+
+      - name: Install and verify bundled document tools
+        shell: pwsh
+        run: |
+          $version = (Get-Content powerai-desktop/package.json -Raw | ConvertFrom-Json).version
+          node release-tools/scripts/windows-installed-smoke.mjs "powerai-desktop/out/PowerAI-$version-win-${{ matrix.arch }}.exe" "$env:RUNNER_TEMP/native-tools" ${{ matrix.arch }} documents
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "Windows ${{ matrix.arch }} passed PDF text extraction and Word document readback. Desktop ${{ inputs.desktop_ref }}, Agent ${{ inputs.agent_ref }}." >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Retain failed installed-tool diagnostic
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: document-tools-failure-${{ matrix.arch }}
+          path: ${{ runner.temp }}/native-tools/evidence.json
+          if-no-files-found: ignore
+          retention-days: 3

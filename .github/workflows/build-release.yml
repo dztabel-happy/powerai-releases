@@ -174,34 +174,10 @@ jobs:
           fi
           node -e "const fs=require('fs'); const file='powerai-desktop/package.json'; const value=JSON.parse(fs.readFileSync(file)); value.version=process.env.VERSION; fs.writeFileSync(file, JSON.stringify(value, null, 2)+'\n')"
 
-      - name: Set up Bun
-        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
-        with:
-          bun-version: ${{ env.BUN_VERSION }}
-
-      - name: Build native agent
-        shell: bash
-        run: |
-          bun install --cwd powerai-agent --filter './packages/opencode' --filter './packages/app' --frozen-lockfile
-          bun run --cwd powerai-agent/packages/opencode build -- --single --skip-install
-
-      - name: Install desktop dependencies
-        shell: bash
-        run: bun install --cwd powerai-desktop --frozen-lockfile
-
-      - name: Prepare checksum-verified Electron distribution
-        shell: bash
-        run: |
-          electron_dist="$(cd powerai-desktop && node scripts/release/prepare-electron.mjs win32 ${{ matrix.arch }} "$RUNNER_TEMP/electron")"
-          echo "ELECTRON_DIST_PATH=$electron_dist" >> "$GITHUB_ENV"
-
       - name: Build unsigned Windows installer
-        working-directory: powerai-desktop
-        env:
-          CI: "true"
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-          NODE_OPTIONS: --max-old-space-size=6144
-        run: bun run build-win:${{ matrix.arch }}
+        uses: ./release-tools/.github/actions/build-windows-installer
+        with:
+          arch: ${{ matrix.arch }}
 
       - name: Verify Windows artifacts
         shell: pwsh
@@ -333,7 +309,7 @@ jobs:
         if: matrix.arch == 'arm64'
         shell: pwsh
         run: |
-          node arm64-release-tools/scripts/windows-arm64-smoke.mjs "powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-arm64.exe" "$env:RUNNER_TEMP/arm64-install"
+          node arm64-release-tools/scripts/windows-installed-smoke.mjs "powerai-desktop/out/PowerAI-${{ needs.guard.outputs.version }}-win-arm64.exe" "$env:RUNNER_TEMP/arm64-install"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Retain ARM64 architecture evidence

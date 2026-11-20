@@ -160,6 +160,23 @@ macOS 每次发布必须满足：Developer ID 签名（`codesign --verify --deep
   `finalize-notarization`，且必须活过 Apple 的排队时间。本自动发布链的来源计划、验收结果、诊断和截图证据保留 90 天。
 - 清理 Actions 中间产物不得删除 Release 资产，也不得改变已发布版本。
 
+## Pre-merge Windows document tools check
+
+For Desktop or Agent changes affecting bundled Windows document executables, their
+launchers, install locations or native build dependencies, run
+`windows-document-candidate.yml` on this repository's main branch. Use the
+reviewed Desktop and Agent commit SHAs. Attach the run link to the PR and require
+both Windows jobs to pass for that source pair before merging. Rerun after a
+change to the candidate code. Extend the installed smoke test when another
+native tool needs a different real operation.
+
+Each runner builds the installer with the release build action, installs it,
+extracts known text with its private pdftotext and reads back a Word document
+created by its installed DocxKit launcher. Success is recorded in the job
+summary with the source commits. On failure the job log is available, and an
+installed-tool diagnostic, when produced, is retained for three days. The
+workflow has read-only repository permissions and does not publish installers.
+
 ## Windows ARM64 (optional architecture)
 
 The release workflow keeps Windows x64 and macOS arm64 as its default. Setting
