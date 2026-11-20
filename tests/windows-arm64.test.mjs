@@ -53,3 +53,14 @@ test('candidate mode cannot publish and ARM64 remains opt-in for releases', () =
   assert.match(workflow, /if \[ "\$RELEASE_MODE" != arm64-candidate \]; then\n\s*test .*refs\/heads\/main/);
   assert.match(workflow, /test "\$\(git -C powerai-desktop rev-parse HEAD\)" = "\$DESKTOP_REF"/);
 });
+
+test('both Windows candidates exercise installed tools using the release build action', () => {
+  const workflow = fs.readFileSync('.github/workflows/windows-document-candidate.yml', 'utf8');
+  const release = fs.readFileSync('.github/workflows/build-release.yml', 'utf8');
+  for (const source of [workflow, release]) assert.match(source, /uses: \.\/release-tools\/\.github\/actions\/build-windows-installer/);
+  for (const runner of ['windows-2025', 'windows-11-arm']) assert.ok(workflow.includes(runner));
+  assert.match(workflow, /windows-installed-smoke\.mjs .*matrix\.arch.* documents/);
+  assert.match(workflow, /contents: read/);
+  assert.doesNotMatch(workflow, /contents: write|gh release|POWERAI_SMOKE_API_KEY/);
+  assert.match(workflow, /if: failure\(\)\s+uses: actions\/upload-artifact/);
+});
