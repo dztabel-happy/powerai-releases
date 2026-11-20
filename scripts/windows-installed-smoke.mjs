@@ -53,10 +53,13 @@ const docx = binary('docxkit', 'docx-kit');
 assert.equal(machine(docx), nativeMachine, 'DocxKit launcher must match the target architecture');
 assert.equal(machine(path.join(path.dirname(docx), 'engine', 'docx-kit.exe')), 0x8664, 'Expected the pinned x64 DocxKit engine');
 const marker = 'PowerAI installed Word check';
-fs.writeFileSync(path.join(cwd, 'content.md'), `# ${marker}\n`);
+fs.writeFileSync(path.join(cwd, 'content.md'), `# Document tool check\n\n${marker}\n`);
 run(docx, ['build', 'content.md', '--out', 'word', '--filename', 'generated.docx']);
 const wordXml = run('tar.exe', ['-xOf', path.join(cwd, 'word', 'generated.docx'), 'word/document.xml']);
-assert.ok(wordXml.includes(marker), 'Generated Word document must contain the source text');
+const wordText = run('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
+  "(([xml][Console]::In.ReadToEnd()).GetElementsByTagName('t','http://schemas.openxmlformats.org/wordprocessingml/2006/main') | ForEach-Object InnerText) -join ''",
+], { input: wordXml });
+assert.ok(wordText.includes(marker), 'Generated Word document must contain the source text');
 evidence.wordCreated = true;
 
 if (suite === 'documents') {
