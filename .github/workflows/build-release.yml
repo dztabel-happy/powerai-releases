@@ -36,6 +36,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  DIAGRAMKIT_ARCHIVE_BASE_URL: ${{ vars.DIAGRAMKIT_ARCHIVE_BASE_URL }}
   BUN_VERSION: 1.3.13
 
 jobs:
