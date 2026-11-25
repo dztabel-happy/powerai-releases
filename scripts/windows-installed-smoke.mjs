@@ -80,6 +80,8 @@ if (includesKit('wwtpfin', 'wwtpfin-consulting-core')) {
   }
   run(finance, ['build', '-p', 'project.yaml', '--evidence', 'evidence.json', '-o', 'finance-results']);
   run(finance, ['verify-deliverable', 'finance-results']);
+  run(finance, ['init-report-plan', 'finance-results', 'report-plan.json', '--source-run', 'installed-example', '--purpose', 'baseline']);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(cwd, 'report-plan.json'), 'utf8')).schema);
   evidence.financeVerified = true;
   console.log('Installed WWTP-Fin built and verified its bundled project example.');
 }
