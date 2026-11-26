@@ -109,7 +109,7 @@ jobs:
           $version = (Get-Content powerai-desktop/package.json -Raw | ConvertFrom-Json).version
           node release-tools/scripts/windows-installed-smoke.mjs "powerai-desktop/out/PowerAI-$version-win-${{ matrix.arch }}.exe" "$env:RUNNER_TEMP/native-tools" ${{ matrix.arch }} documents
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          "Windows ${{ matrix.arch }} passed PDF text extraction and Word document readback. Desktop ${{ inputs.desktop_ref }}, Agent ${{ inputs.agent_ref }}." >> $env:GITHUB_STEP_SUMMARY
+          "Windows ${{ matrix.arch }} passed the installed document and bundled kit checks. Desktop ${{ inputs.desktop_ref }}, Agent ${{ inputs.agent_ref }}." >> $env:GITHUB_STEP_SUMMARY
 
       - name: Retain failed installed-tool diagnostic
         if: failure()

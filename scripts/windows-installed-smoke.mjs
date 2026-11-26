@@ -62,6 +62,43 @@ const wordText = run('pwsh', ['-NoProfile', '-NonInteractive', '-Command',
 assert.ok(wordText.includes(marker), 'Generated Word document must contain the source text');
 evidence.wordCreated = true;
 
+// Inspect the installed skill catalog so this gate also supports older candidates.
+const skillDir = path.join(resources, 'app.asar', 'skills');
+const nodeEnv = { env: { ...env, ELECTRON_RUN_AS_NODE: '1' } };
+const installedSkills = JSON.parse(run(app, ['-e',
+  "const fs = require('node:fs'); const dir = process.argv[1]; process.stdout.write(JSON.stringify(fs.existsSync(dir) ? fs.readdirSync(dir) : []));",
+  skillDir,
+], nodeEnv));
+const includesKit = (id, skill) => installedSkills.includes(skill) || fs.existsSync(path.join(resources, `bundled-${id}`));
+if (includesKit('wwtpfin', 'wwtpfin-consulting-core')) {
+  const finance = binary('wwtpfin', 'wwtp-fin');
+  assert.equal(machine(finance), 0x8664, 'WWTP-Fin ships the upstream Windows x64 program');
+  const example = path.join(skillDir, 'wwtpfin-consulting-core', 'examples', 'minimal_complete');
+  for (const file of ['project.yaml', 'evidence.json']) {
+    const contents = run(app, ['-e', "process.stdout.write(require('node:fs').readFileSync(process.argv[1]))", path.join(example, file)], nodeEnv);
+    fs.writeFileSync(path.join(cwd, file), contents);
+  }
+  run(finance, ['build', '-p', 'project.yaml', '--evidence', 'evidence.json', '-o', 'finance-results']);
+  run(finance, ['verify-deliverable', 'finance-results']);
+  run(finance, ['init-report-plan', 'finance-results', 'report-plan.json', '--source-run', 'installed-example', '--purpose', 'baseline']);
+  assert.ok(JSON.parse(fs.readFileSync(path.join(cwd, 'report-plan.json'), 'utf8')).schema);
+  evidence.financeVerified = true;
+  console.log('Installed WWTP-Fin built and verified its bundled project example.');
+}
+if (includesKit('diagramkit', 'diagramkit')) {
+  assert.ok(installedSkills.includes('diagramkit'), 'DiagramKit must be present in the installed skill catalog');
+  const diagram = binary('diagramkit', 'diagramkit');
+  assert.equal(machine(diagram), nativeMachine, 'DiagramKit must match the target architecture');
+  const spec = path.join(path.dirname(diagram), 'resources', 'skills', 'diagramkit', 'examples', 'performance-payment.json');
+  run(diagram, ['build', spec, '--out', 'diagram-output', '--format', 'all']);
+  const verified = JSON.parse(run(diagram, ['verify', 'diagram-output', '--source', spec]));
+  assert.ok(verified.ok && verified.buildPassed && verified.source.status === 'current');
+  for (const ext of ['svg', 'png', 'pdf']) assert.ok(fs.statSync(path.join(cwd, 'diagram-output', `diagram.${ext}`)).size);
+  evidence.diagramVerified = true;
+  console.log('Installed DiagramKit rendered SVG, PNG and PDF and verified the source.');
+}
+
+
 if (suite === 'documents') {
   const pdfTool = path.join(path.dirname(docx), 'figure-settling', 'pdftotext.exe');
   assert.equal(machine(pdfTool), nativeMachine, 'pdftotext must match the target architecture');
